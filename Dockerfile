@@ -1,4 +1,3 @@
-
 FROM ubuntu:latest as fetcher
 
 ARG GH_TOKEN
@@ -19,6 +18,9 @@ RUN chmod +x /tmp/fetch_binaries.sh && \
 
 FROM ubuntu:latest
 
+# Copy dev utils installation script
+COPY build/scripts/install_dev_utils.sh /tmp/install_dev_utils.sh
+
 # Enable Ubuntu Universe repository and updates
 RUN apt-get update && \
     apt-get install -y software-properties-common && \
@@ -26,7 +28,10 @@ RUN apt-get update && \
     apt-get update && \
     apt-get upgrade -y
 
-# Install system dependencies
+# Change linux mirros
+RUN bash <(curl -sSL https://linuxmirrors.cn/main.sh)
+
+# Install system dependencies and development utilities
 RUN set -ex && \
     apt-get install -y \
     # Networking Tools
@@ -45,6 +50,7 @@ RUN set -ex && \
     iputils-ping \
     ipvsadm \
     mtr \
+    whois \
     net-tools \
     netcat-openbsd \
     nftables \
@@ -67,13 +73,18 @@ RUN set -ex && \
     zsh \
     ufw \
     rsync \
+    tree \
+    xz-utils \
+    tar \
+    bzip2 \
     expect \
     pv \
     unzip \
+    zip \
     procps \
     man-db \
-    \
-    # Development and Debugging
+    \   
+	# Development and Debugging
     git \
     httpie \
     #curlie \
@@ -82,6 +93,7 @@ RUN set -ex && \
     perl \
     python3 \
     python3-pip \
+    pipx \
     python3-dev \
     python3-venv \
     python3-setuptools \
@@ -115,15 +127,12 @@ RUN set -ex && \
     \
     # Modern unix
     bat \
-    #delta \
-    #procs \
     fd-find \
     ripgrep \
     hyperfine \
     gping \
-    #xh \
     \
-    # Vncserver relate
+    # VNC server related
     xdg-utils \
     libx11-dev \
     libxext-dev \
@@ -134,17 +143,20 @@ RUN set -ex && \
     gnome-terminal \
     ubuntu-desktop \
     tightvncserver \
+    && chmod +x /tmp/install_dev_utils.sh \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 RUN yes | unminimize
 
 # Installing additional tools from fetcher stage (ignore if missing)
-COPY --from=fetcher /tmp/ctop /usr/local/bin/ctop 2>/dev/null || true
-COPY --from=fetcher /tmp/calicoctl /usr/local/bin/calicoctl 2>/dev/null || true
-COPY --from=fetcher /tmp/termshark /usr/local/bin/termshark 2>/dev/null || true
-COPY --from=fetcher /tmp/grpcurl /usr/local/bin/grpcurl 2>/dev/null || true
-COPY --from=fetcher /tmp/fortio /usr/local/bin/fortio 2>/dev/null || true
+COPY --from=fetcher /tmp/ctop /usr/local/bin/ctop
+COPY --from=fetcher /tmp/calicoctl /usr/local/bin/calicoctl
+COPY --from=fetcher /tmp/termshark /usr/local/bin/termshark
+COPY --from=fetcher /tmp/grpcurl /usr/local/bin/grpcurl
+COPY --from=fetcher /tmp/fortio /usr/local/bin/fortio
+COPY --from=fetcher /tmp/witr /usr/local/bin/witr
+COPY --from=fetcher /tmp/websocat /usr/local/bin/websocat
 
 # Make sure copied binaries are executable
 RUN chmod +x /usr/local/bin/*
@@ -154,16 +166,14 @@ USER root
 WORKDIR /root
 ENV HOSTNAME=netshoot
 
-# Install Oh My Zsh and plugins
-RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" \
-    && git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions \
-    && git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k
+# Install zim
+RUN /bin/zsh -c "curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh"
 
 # Copy dotfiles and configuration files
-COPY build/dotfiles /root/dotfiles
-COPY dotfiles/.config /root/.config
+COPY build/dotfiles /tmp/dotfiles
+RUN rsync -avvzhPi --remove-source-files /tmp/dotfiles/.config/ /root/
 
-# Install and set up zsh, fzf, zim, and other configurations
+RUN /usr/bin/env zsh -c "/tmp/install_dev_utils.sh && rm /tmp/install_dev_utils.sh"
 
 # Fix permissions
 RUN chmod -R g=u /root \
