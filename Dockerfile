@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
     jq
 
 # Copy and run binary fetching script - continue even if some downloads fail
-COPY build/fetch_binaries.sh /tmp/fetch_binaries.sh
+COPY build/scripts/fetch_binaries.sh /tmp/fetch_binaries.sh
 RUN chmod +x /tmp/fetch_binaries.sh && \
     /tmp/fetch_binaries.sh
 
@@ -93,11 +93,7 @@ COPY --from=fetcher /tmp/grpcurl /usr/local/bin/grpcurl 2>/dev/null || true
 COPY --from=fetcher /tmp/fortio /usr/local/bin/fortio 2>/dev/null || true
 
 # Make sure copied binaries are executable
-RUN chmod +x /usr/local/bin/ctop 2>/dev/null || true
-RUN chmod +x /usr/local/bin/calicoctl 2>/dev/null || true
-RUN chmod +x /usr/local/bin/termshark 2>/dev/null || true
-RUN chmod +x /usr/local/bin/grpcurl 2>/dev/null || true
-RUN chmod +x /usr/local/bin/fortio 2>/dev/null || true
+RUN chmod +x /usr/local/bin/*
 
 # Set up user and environment
 USER root
@@ -110,8 +106,6 @@ RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master
     && git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k
 
 # Copy configuration files
-COPY zshrc .zshrc
-COPY motd motd
 
 # Fix permissions
 RUN chmod -R g=u /root \
