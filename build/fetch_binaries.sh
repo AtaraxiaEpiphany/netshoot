@@ -1,10 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+#get_latest_release() {
+#  API="https://api.github.com/repos/$1/releases/latest"
+#  echo "GitHub API ==> ${API}\n"
+#  curl --silent $API | # Get latest release from GitHub api
+#    grep '"tag_name":' |                                            # Get tag line
+#    sed -E 's/.*"([^"]+)".*/\1/'                                    # Pluck JSON value
+#}
+
 get_latest_release() {
-  curl --silent "https://api.github.com/repos/$1/releases/latest" | # Get latest release from GitHub api
-    grep '"tag_name":' |                                            # Get tag line
-    sed -E 's/.*"([^"]+)".*/\1/'                                    # Pluck JSON value
+  API="https://api.github.com/repos/$1/releases/latest"
+
+  # Try to use GitHub token from environment variable if available
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    response=$(curl --silent --fail -H "Authorization: token $GH_TOKEN" "$API") || {
+      echo "Error: Failed to fetch GitHub API for '$1' with authentication" >&2
+      return 1
+    }
+  else
+    # Fall back to unauthenticated request
+    response=$(curl --silent --fail "$API") || {
+      echo "Error: Failed to fetch GitHub API for '$1' without authentication" >&2
+      return 1
+    }
+  fi
+
+  if command -v jq >/dev/null; then
+    echo "$response" | jq -r '.tag_name'
+  else
+  	curl --silent $API | # Get latest release from GitHub api
+	grep '"tag_name":' |                                            # Get tag line
+	sed -E 's/.*"([^"]+)".*/\1/'                                    # Pluck JSON value
+  fi
 }
 
 
@@ -59,7 +87,7 @@ get_grpcurl() {
   wget "$LINK" -O /tmp/grpcurl.tar.gz  && \
   tar --no-same-owner -zxvf /tmp/grpcurl.tar.gz && \
   mv "grpcurl" /tmp/grpcurl && \
-  chmod +x /tmp/grpcurl
+  chmod +x /tmp/grpcurl && \
   chown root:root /tmp/grpcurl
 }
 
@@ -77,10 +105,41 @@ get_fortio() {
   chmod +x /tmp/fortio
 }
 
+get_witr() {
+  VERSION=$(get_latest_release pranshuparmar/witr)
+  LINK="https://github.com/pranshuparmar/witr/releases/download/${VERSION}/witr-linux-${ARCH}"
+  wget "$LINK" -O /tmp/witr && chmod +x /tmp/witr
+}
 
-get_ctop
-get_calicoctl
-get_termshark
-get_grpcurl
-get_fortio
 
+get_websocat() {
+  VERSION=$(get_latest_release vi/websocat)
+  LINK="https://github.com/vi/websocat/releases/download/${VERSION}/websocat.x86_64-unknown-linux-musl"
+  wget "$LINK" -O /tmp/websocat && chmod +x /tmp/websocat
+}
+
+
+if ! get_fortio; then
+	echo "get_fortio failed, but script continues"
+fi
+
+if ! get_ctop; then
+	echo "get_ctop failed, but script continues"
+fi
+if ! get_calicoctl; then
+	echo "get_calicoctl failed, but script continues"
+fi
+if ! get_termshark; then
+	echo "get_termshark failed, but script continues"
+fi
+if ! get_grpcurl; then
+	echo "get_grpcurl failed, but script continues"
+fi
+
+if ! get_witr; then
+	echo "get_witr failed, but script continues"
+fi
+
+if ! get_websocat; then
+	echo "get_websocat failed, but script continues"
+fi

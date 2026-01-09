@@ -1,108 +1,121 @@
-FROM debian:stable-slim as fetcher
-COPY build/fetch_binaries.sh /tmp/fetch_binaries.sh
+FROM ubuntu:latest as fetcher
 
+# Install essential packages for downloading
 RUN apt-get update && apt-get install -y \
-  curl \
-  wget
+    ca-certificates \
+    curl \
+    wget \
+    jq
 
-RUN /tmp/fetch_binaries.sh
+# Copy and run binary fetching script - continue even if some downloads fail
+COPY build/fetch_binaries.sh /tmp/fetch_binaries.sh
+RUN chmod +x /tmp/fetch_binaries.sh && \
+    /tmp/fetch_binaries.sh
 
-FROM alpine:3.23.2
+FROM ubuntu:latest
 
-RUN set -ex \
-    && echo "http://dl-cdn.alpinelinux.org/alpine/edge/main" >> /etc/apk/repositories \
-    && echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories \
-    && echo "http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories \
-    && apk update \
-    && apk upgrade \
-    && apk add --no-cache \
+# Enable Ubuntu Universe repository and updates
+RUN apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository universe && \
+    apt-get update && \
+    apt-get upgrade -y
+
+# Install system dependencies
+RUN apt-get install -y --no-install-recommends \
+    # Networking Tools
     apache2-utils \
-    bash \
-    bind-tools \
-    bird \
+    bind9-utils \
     bridge-utils \
-    busybox-extras \
-    conntrack-tools \
+    conntrack \
     curl \
     dhcping \
-    drill \
     ethtool \
-    file\
-    fping \
     iftop \
-    iperf \
     iperf3 \
     iproute2 \
     ipset \
     iptables \
-    iptraf-ng \
-    iputils \
+    iputils-ping \
     ipvsadm \
-    httpie \
-    jq \
-    libc6-compat \
-    liboping \
-    ltrace \
     mtr \
-    net-snmp-tools \
+    net-tools \
     netcat-openbsd \
     nftables \
     ngrep \
     nmap \
-    nmap-nping \
-    nmap-scripts \
     openssl \
-    py3-pip \
-    py3-setuptools \
-    scapy \
     socat \
     speedtest-cli \
-    openssh \
-    oh-my-zsh \
-    strace \
     tcpdump \
     tcptraceroute \
-    trippy \
-    tshark \
+    traceroute \
+    \
+    # System Utilities
+    bash \
+    busybox \
+    file \
+    jq \
+    libc6 \
     util-linux \
-    vim \
-    git \
     zsh \
-    websocat \
+    \
+    # Development and Debugging
+    git \
+    httpie \
+    ltrace \
+    openssh-client \
+    perl \
+    python3-pip \
+    python3-setuptools \
+    strace \
     swaks \
-    perl-crypt-ssleay \
-    perl-net-ssleay
+    vim \
+    \
+    # Monitoring and Performance
+    fping \
+    iftop \
+    snmp \
+    \
+    # Scripting and Extended Utilities
+    dnsutils \
+    net-tools \
+    scapy \
+    tshark \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Installing ctop - top-like container monitor
-COPY --from=fetcher /tmp/ctop /usr/local/bin/ctop
+# Installing additional tools from fetcher stage (ignore if missing)
+COPY --from=fetcher /tmp/ctop /usr/local/bin/ctop 2>/dev/null || true
+COPY --from=fetcher /tmp/calicoctl /usr/local/bin/calicoctl 2>/dev/null || true
+COPY --from=fetcher /tmp/termshark /usr/local/bin/termshark 2>/dev/null || true
+COPY --from=fetcher /tmp/grpcurl /usr/local/bin/grpcurl 2>/dev/null || true
+COPY --from=fetcher /tmp/fortio /usr/local/bin/fortio 2>/dev/null || true
 
-# Installing calicoctl
-COPY --from=fetcher /tmp/calicoctl /usr/local/bin/calicoctl
+# Make sure copied binaries are executable
+RUN chmod +x /usr/local/bin/ctop 2>/dev/null || true
+RUN chmod +x /usr/local/bin/calicoctl 2>/dev/null || true
+RUN chmod +x /usr/local/bin/termshark 2>/dev/null || true
+RUN chmod +x /usr/local/bin/grpcurl 2>/dev/null || true
+RUN chmod +x /usr/local/bin/fortio 2>/dev/null || true
 
-# Installing termshark
-COPY --from=fetcher /tmp/termshark /usr/local/bin/termshark
-
-# Installing grpcurl
-COPY --from=fetcher /tmp/grpcurl /usr/local/bin/grpcurl
-
-# Installing fortio
-COPY --from=fetcher /tmp/fortio /usr/local/bin/fortio
-
-# Setting User and Home
+# Set up user and environment
 USER root
 WORKDIR /root
-ENV HOSTNAME netshoot
+ENV HOSTNAME=netshoot
 
-# ZSH Themes
-RUN curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh | sh
-RUN git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
-RUN git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k
+# Install Oh My Zsh and plugins
+RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" \
+    && git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions \
+    && git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k
+
+# Copy configuration files
 COPY zshrc .zshrc
 COPY motd motd
 
-# Fix permissions for OpenShift and tshark
-RUN chmod -R g=u /root
-RUN chown root:root /usr/bin/dumpcap
+# Fix permissions
+RUN chmod -R g=u /root \
+    && chown root:root /usr/bin/dumpcap
 
-# Running ZSH
+# Set default shell
 CMD ["zsh"]
