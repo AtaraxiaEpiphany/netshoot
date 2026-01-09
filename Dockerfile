@@ -1,4 +1,9 @@
+
 FROM ubuntu:latest as fetcher
+
+ARG GH_TOKEN
+
+ENV GH_TOKEN=${GH_TOKEN:-}
 
 # Install essential packages for downloading
 RUN apt-get update && apt-get install -y \
@@ -22,7 +27,8 @@ RUN apt-get update && \
     apt-get upgrade -y
 
 # Install system dependencies
-RUN apt-get install -y --no-install-recommends \
+RUN set -ex && \
+    apt-get install -y \
     # Networking Tools
     apache2-utils \
     bind9-utils \
@@ -59,18 +65,42 @@ RUN apt-get install -y --no-install-recommends \
     libc6 \
     util-linux \
     zsh \
+    ufw \
+    rsync \
+    expect \
+    pv \
+    unzip \
+    procps \
+    man-db \
     \
     # Development and Debugging
     git \
     httpie \
+    #curlie \
     ltrace \
     openssh-client \
     perl \
+    python3 \
     python3-pip \
+    python3-dev \
+    python3-venv \
     python3-setuptools \
+    build-essential \
+    cmake \
+    ccache \
+    gdb \
+    g++ \
+    gcc \
+    clang \
+    make \
+    valgrind \
+    bear \
+    maven \
+    openjdk-21-jdk \
     strace \
     swaks \
     vim \
+    tmux \
     \
     # Monitoring and Performance
     fping \
@@ -82,8 +112,32 @@ RUN apt-get install -y --no-install-recommends \
     net-tools \
     scapy \
     tshark \
+    \
+    # Modern unix
+    bat \
+    #delta \
+    #procs \
+    fd-find \
+    ripgrep \
+    hyperfine \
+    gping \
+    #xh \
+    \
+    # Vncserver relate
+    xdg-utils \
+    libx11-dev \
+    libxext-dev \
+    gnome-panel \
+    gnome-settings-daemon \
+    metacity \
+    nautilus \
+    gnome-terminal \
+    ubuntu-desktop \
+    tightvncserver \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+RUN yes | unminimize
 
 # Installing additional tools from fetcher stage (ignore if missing)
 COPY --from=fetcher /tmp/ctop /usr/local/bin/ctop 2>/dev/null || true
@@ -105,7 +159,11 @@ RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master
     && git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions \
     && git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k
 
-# Copy configuration files
+# Copy dotfiles and configuration files
+COPY build/dotfiles /root/dotfiles
+COPY dotfiles/.config /root/.config
+
+# Install and set up zsh, fzf, zim, and other configurations
 
 # Fix permissions
 RUN chmod -R g=u /root \
