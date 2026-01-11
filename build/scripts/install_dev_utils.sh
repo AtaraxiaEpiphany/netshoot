@@ -11,16 +11,8 @@ log_step() {
 
 log_step "Zimfw and plugins"
 
-# Install Zim framework with retry and error handling
-max_retries=3
-retry_count=0
-rm /etc/zsh/zshrc
-while [ $retry_count -lt $max_retries ]; do
-    curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh && break
-    retry_count=$((retry_count+1))
-    echo "Zim installation attempt $retry_count failed. Retrying..."
-    sleep 2
-done
+# Install Zim framework
+curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh
 
 # Copy and setup dotfiles and dev utils
 rsync -avvzhPi --remove-source-files /tmp/dotfiles/.config/ /root/
