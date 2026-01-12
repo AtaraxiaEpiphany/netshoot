@@ -19,7 +19,7 @@ export CXXFLAGS="-std=c++23 -g"
 export CXX="g++-13"
 
 #jupyterlab
-[ -f "$HOME/.jupyter/venv/bin/activate" ] && source "$HOME/.jupyter/venv/bin/activate"
+#[ -f "$HOME/.jupyter/venv/bin/activate" ] && source "$HOME/.jupyter/venv/bin/activate"
 
 alias ls='ls --classify --color=auto'
 alias ll='ls -alh --classify --color=auto'

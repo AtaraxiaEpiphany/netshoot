@@ -112,11 +112,11 @@ go install github.com/charmbracelet/glow/v2@latest
 
 ## jupyterlab
 curl -LsSf https://astral.sh/uv/install.sh | sh
-mkdir -p ~/Workspaces/Utils/jupyterlab \
-	&& cd ~/Workspaces/Utils/jupyterlab \
-	&& uv venv "$HOME/.jupyter/venv" \
-	&& source "$HOME/.jupyter/venv/bin/activate" \
-	&& uv pip install jupyterlab
+#mkdir -p ~/Workspaces/Utils/jupyterlab \
+#	&& cd ~/Workspaces/Utils/jupyterlab \
+#	&& uv venv "$HOME/.jupyter/venv" \
+#	&& source "$HOME/.jupyter/venv/bin/activate" \
+#	&& uv pip install jupyterlab
 
 ## jqplayground
 npm install -g next
