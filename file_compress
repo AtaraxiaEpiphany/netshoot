@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Compression utility following Unix philosophy
+# Supports multiple compression formats with progress tracking
+
+VERSION="1.1.0"
+
+# Default settings
+COMPRESSION="zstd"
+COMPRESSION_LEVEL=22  # Maximum compression level for zstd by default
+THREADS=$(( $(nproc) * 2 ))
+OUTPUT_FILE="-"
+VERBOSE=0
+DRY_RUN=0  # New flag for dry run mode
+
+# Color output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Error logging
+error() {
+    echo -e "${RED}[ERROR]${NC} $*" >&2
+    exit 1
+}
+
+# Verbose logging
+verbose() {
+    [[ $VERBOSE -eq 1 ]] && echo -e "${BLUE}[VERBOSE]${NC} $*" >&2
+}
+
+# Logging and checking dependencies
+setup_environment() {
+    # Check required compression tools
+    local compression_tools=("zstd" "gzip" "bzip2" "xz")
+    local missing_tools=()
+
+    for tool in "${compression_tools[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing_tools+=("$tool")
+        fi
+    done
+
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        error "Missing compression tools: ${missing_tools[*]}"
+    fi
+
+    # Optional progress tracking tool
+    if ! command -v pv >/dev/null 2>&1; then
+        verbose "pv (pipe viewer) not found. Progress tracking will be disabled."
+    fi
+}
+
+# Check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Setup at script start
+setup_environment
+
+# Compression function
+compress() {
+    local input="$1"
+    local output="$2"
+    local format="$3"
+    local level="$4"
+    local threads="$5"
+
+    # Progress tracking
+    local use_pv=0
+    command_exists pv && use_pv=1
+
+    # Get input file size for progress tracking
+    local total_size=0
+    local input_file="$input"
+
+    # For stdin, measure input size before compression
+    if [[ "$input" == "-" ]]; then
+        input_file=$(mktemp)
+        trap "rm -f '$input_file'" EXIT
+        cat > "$input_file"
+        total_size=$(stat -c %s "$input_file" 2>/dev/null || echo 0)
+    else
+        total_size=$(stat -c %s "$input_file" 2>/dev/null || echo 0)
+    fi
+
+    # Minimum size for progress bar
+    [[ $total_size -eq 0 ]] && total_size=1024
+
+    # Compression function with optional progress and size limit
+    perform_compression() {
+        # Log minimal verbose information
+        if [[ $VERBOSE -eq 1 ]]; then
+            verbose "Compressing (format: $format, level: $level)"
+        fi
+
+        # Ensure input is available
+        if [[ -n "$input_file" && ! -f "$input_file" ]]; then
+            error "Input file does not exist: $input_file"
+        fi
+
+        # Prepare base options for each format
+        case "$format" in
+            gzip)
+                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
+                    pv -pterb "$input_file" 2>/dev/null | gzip -$level || error "Gzip compression failed"
+                else
+                    gzip -$level || error "Gzip compression failed"
+                fi
+                ;;
+            bzip2)
+                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
+                    pv -pterb "$input_file" 2>/dev/null | bzip2 -$level || error "Bzip2 compression failed"
+                else
+                    bzip2 -$level || error "Bzip2 compression failed"
+                fi
+                ;;
+            xz)
+                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
+                    pv -pterb "$input_file" 2>/dev/null | xz -$level || error "XZ compression failed"
+                else
+                    xz -$level || error "XZ compression failed"
+                fi
+                ;;
+            zstd)
+                local zstd_opts=""
+                if [[ "$level" -lt 0 ]]; then
+                    # Fast compression: --fast option (1-50)
+                    local fast_level=$((-level))
+                    zstd_opts="--fast=$fast_level"
+                elif [[ "$level" -gt 19 ]]; then
+                    # Ultra compression: --ultra -$level
+                    zstd_opts="--ultra -$level"
+                else
+                    zstd_opts="-$level"
+                fi
+
+                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
+                    pv -pterb "$input_file" 2>/dev/null | zstd $zstd_opts --threads=$threads || error "Zstd compression failed"
+                else
+                    zstd $zstd_opts --threads=$threads || error "Zstd compression failed"
+                fi
+                ;;
+            none)
+                cat
+                ;;
+            *)
+                error "Unsupported compression format: $format"
+                ;;
+        esac
+    }
+
+    # Progress wrapper
+    wrapped_compression() {
+        # If pv is available, use it with progress bar
+        if [[ $use_pv -eq 1 && -n "$input_file" ]]; then
+            verbose "Compressing with progress bar..."
+            pv -pterb -s "$total_size" "$input_file" 2>/dev/null | perform_compression
+        else
+            verbose "No progress bar available. Compressing..."
+            perform_compression < "$input_file"
+        fi
+    }
+
+    # Perform compression with input redirection
+    verbose "Compression method: $format, Level: $level, Threads: $threads"
+    verbose "Input source: $input"
+
+    # Ensure we handle both stdin and file inputs
+    if [[ "$input" == "-" ]]; then
+        # Ensure stdin is not a terminal
+        if [ -t 0 ]; then
+            error "No input provided via stdin (terminal input)"
+        fi
+
+        # Read stdin
+        perform_compression
+    else
+        # Use file input
+        if [[ ! -f "$input" ]]; then
+            error "Input file not found: $input"
+        fi
+        perform_compression < "$input"
+    fi
+}
+
+# Print usage information
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS] [INPUT_FILE]
+
+Compress files or stdin using various compression formats.
+
+Compression Formats:
+  zstd: Best overall compression (recommended)
+        Level -100 to 22 (default: 22, max)
+        Use -10 to -1 for fast compression
+  gzip:  Traditional, widely supported
+        Level 1-9 (default: 9, max compression)
+  bzip2: High compression ratio, slower
+        Level 1-9 (default: 9, max compression)
+  xz:    Best for archiving
+        Level 1-9 (default: 9, max compression)
+
+Options:
+  -c, --compression FORMAT   Specify compression method
+                             Choices: zstd (default), gzip, bzip2, xz, none
+  -l, --level LEVEL         Compression intensity
+                             zstd: -100 to 22
+                             others: 1-9
+  -j, --threads THREADS     Parallel compression threads (zstd only)
+                             Default: CPU cores * 2
+  -o, --output FILE         Output file path
+                             Default: stdout
+  -v, --verbose             Show detailed compression info
+  -h, --help                Display this help message
+  --version                 Show script version
+  --dry-run                 Simulate compression without writing output
+
+Examples:
+  echo 'hello' | $0                  # Max zstd compression
+  $0 -c gzip file.txt                # Max gzip compression
+  $0 -c zstd -l -10 file.txt         # Fast zstd compression
+  $0 -o compressed.zst file.txt      # Output to specific file
+  $0 --dry-run file.txt              # Simulate compression
+
+Dependencies:
+  - zstd, gzip, bzip2, xz recommended
+  - pv (optional) for progress tracking
+EOF
+    exit 0
+}
+
+# Parse command-line arguments
+parse_args() {
+    TEMP=$(getopt -o c:l:j:o:vh --long compression:,level:,threads:,output:,verbose,help,version,dry-run -n "$0" -- "$@")
+
+    if [ $? != 0 ] ; then error "Terminating..." >&2 ; exit 1 ; fi
+
+    eval set -- "$TEMP"
+
+    while true; do
+        case "$1" in
+            -c|--compression)
+                COMPRESSION="$2"
+                shift 2
+                ;;
+            -l|--level)
+                COMPRESSION_LEVEL="$2"
+                shift 2
+                ;;
+            -j|--threads)
+                THREADS="$2"
+                shift 2
+                ;;
+            -o|--output)
+                OUTPUT_FILE="$2"
+                shift 2
+                ;;
+            -v|--verbose)
+                VERBOSE=1
+                shift
+                ;;
+            -h|--help)
+                usage
+                ;;
+            --version)
+                echo "chunkit version $VERSION"
+                exit 0
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *)
+                error "Internal error!"
+                ;;
+        esac
+    done
+
+    # Determine input source
+    if [ $# -eq 0 ]; then
+        # No input file, use stdin
+        INPUT_FILE="-"
+    elif [ $# -eq 1 ]; then
+        # Input file specified
+        INPUT_FILE="$1"
+
+        # Enhanced file check with more detailed error messages
+        if [ ! -e "$INPUT_FILE" ]; then
+            error "Input file or directory does not exist: $INPUT_FILE"
+        elif [ ! -f "$INPUT_FILE" ]; then
+            # Additional check for file type
+            if [ -d "$INPUT_FILE" ]; then
+                error "Input is a directory, not a file: $INPUT_FILE"
+            else
+                error "Input is not a regular file: $INPUT_FILE"
+            fi
+        elif [ ! -r "$INPUT_FILE" ]; then
+            error "Input file is not readable: $INPUT_FILE"
+        fi
+    else
+        error "Too many arguments. Use -h for help."
+    fi
+}
+
+# Validate inputs
+validate_inputs() {
+    # Validate compression format
+    case "$COMPRESSION" in
+        gzip|bzip2|xz|zstd|none) ;;
+        *) error "Unsupported compression format: $COMPRESSION" ;;
+    esac
+
+    # Validate compression level
+    case "$COMPRESSION" in
+        zstd)
+            [[ "$COMPRESSION_LEVEL" -lt -100 || "$COMPRESSION_LEVEL" -gt 22 ]] &&
+                error "Zstd level must be between -100 and 22"
+            ;;
+        *)
+            [[ "$COMPRESSION_LEVEL" -lt 1 || "$COMPRESSION_LEVEL" -gt 9 ]] &&
+                error "Compression level must be between 1 and 9"
+            ;;
+    esac
+
+    # Validate threads
+    [[ ! "$THREADS" =~ ^[0-9]+$ ]] && error "Threads must be a positive integer"
+
+    # Default to max compression for all formats
+    if [[ "$COMPRESSION" == "zstd" && "$COMPRESSION_LEVEL" -eq 10 ]]; then
+        COMPRESSION_LEVEL=22  # Maximum zstd compression
+    elif [[ "$COMPRESSION" != "zstd" && "$COMPRESSION_LEVEL" -eq 6 ]]; then
+        COMPRESSION_LEVEL=9   # Maximum compression for other formats
+    fi
+}
+
+# Main compression function
+main() {
+    parse_args "$@"
+    validate_inputs
+
+    # Verbose settings output
+    if [[ $VERBOSE -eq 1 ]]; then
+        verbose "Compression settings:"
+        verbose "  Format: $COMPRESSION"
+        verbose "  Level: $COMPRESSION_LEVEL"
+        verbose "  Threads: $THREADS"
+        verbose "  Input: $INPUT_FILE"
+        verbose "  Output: $OUTPUT_FILE"
+    fi
+
+    # Prepare temporary files for size tracking
+    input_temp=$(mktemp)
+    output_temp=$(mktemp)
+    trap "rm -f '$input_temp' '$output_temp'" EXIT
+
+    # Capture input for size tracking
+    if [[ "$INPUT_FILE" == "-" ]]; then
+        cat > "$input_temp"
+        input_file="$input_temp"
+    else
+        input_file="$INPUT_FILE"
+    fi
+
+    # Dry run mode
+    if [[ $DRY_RUN -eq 1 ]]; then
+        verbose "Dry run mode: Simulating compression"
+
+        input_size=$(stat -c %s "$input_file")
+
+        if [[ "$COMPRESSION" == "zstd" ]]; then
+            # Estimated compression ratio for zstd
+            estimated_ratio=0.5  # Typically 50% of original size
+        elif [[ "$COMPRESSION" == "gzip" ]]; then
+            # Estimated compression ratio for gzip
+            estimated_ratio=0.6  # Typically 60% of original size
+        elif [[ "$COMPRESSION" == "bzip2" ]]; then
+            # Estimated compression ratio for bzip2
+            estimated_ratio=0.4  # Typically 40% of original size
+        elif [[ "$COMPRESSION" == "xz" ]]; then
+            # Estimated compression ratio for xz
+            estimated_ratio=0.3  # Typically 30% of original size
+        else
+            # For none or unknown, no compression
+            estimated_ratio=1
+        fi
+
+        estimated_output_size=$(echo "scale=0; $input_size * $estimated_ratio" | bc)
+
+        verbose "Dry Run Compression Estimate:"
+        verbose "  Compression: $COMPRESSION, Level: $COMPRESSION_LEVEL"
+        verbose "  Input Size:  $(numfmt --to=iec-i --suffix=B --format="%.1f" "$input_size")"
+        verbose "  Estimated Output Size: $(numfmt --to=iec-i --suffix=B --format="%.1f" "$estimated_output_size")"
+
+        # Exit with simulated success
+        exit 0
+    fi
+
+    # Perform compression
+    set +e  # Disable exit on error to capture the true result
+    if [[ "$OUTPUT_FILE" == "-" ]]; then
+        # Output to stdout with binary mode, always write to output_temp
+        compress "$input_file" - "$COMPRESSION" "$COMPRESSION_LEVEL" "$THREADS" > "$output_temp"
+        compression_status=$?
+
+        # Ensure output is written to stdout
+        cat "$output_temp"
+    else
+        # Output to specified file
+        compress "$input_file" - "$COMPRESSION" "$COMPRESSION_LEVEL" "$THREADS" > "$OUTPUT_FILE"
+        compression_status=$?
+        output_temp="$OUTPUT_FILE"
+    fi
+    set -e  # Re-enable exit on error
+
+    # Compute compression ratio for verbose mode
+    if [[ $VERBOSE -eq 1 ]]; then
+        input_size=$(stat -c %s "$input_file")
+        output_size=$(stat -c %s "$output_temp")
+
+        # Compute compression ratio (0-1)
+        compression_ratio=$(echo "scale=2; $output_size / $input_size" | bc)
+
+        # Convert to percentage for display
+        compression_percent=$(echo "scale=2; (1 - $output_size / $input_size) * 100" | bc)
+
+        verbose "Compression Ratio:"
+        verbose "  Input Size:  $(numfmt --to=iec-i --suffix=B --format="%.1f" "$input_size")"
+        verbose "  Output Size: $(numfmt --to=iec-i --suffix=B --format="%.1f" "$output_size")"
+        verbose "  Ratio:       $compression_ratio"
+        verbose "  Compression: $compression_percent%"
+    fi
+
+    # Ensure successful exit
+    exit $compression_status
+}
+
+# Run the script
+main "$@"
