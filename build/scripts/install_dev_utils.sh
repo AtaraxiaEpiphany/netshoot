@@ -82,6 +82,7 @@ log_step "Install claude code and config claude code"
 curl -fsSL https://claude.ai/install.sh | bash
 claude plugin marketplace add anthropics/skills
 claude plugin marketplace add anthropics/claude-plugins-official
+claude plugin marketplace add obra/superpowers-marketplace
 #claude plugin install document-skills@anthropic-agent-skills
 #claude plugin install example-skills@anthropic-agent-skills
 
@@ -129,4 +130,3 @@ mkdir -p ~/Workspaces/Projects \
 
 ## mcat: install first to load cargo env
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Skardyy/mcat/releases/download/v0.4.6/mcat-installer.sh | sh
-

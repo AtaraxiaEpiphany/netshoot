@@ -83,6 +83,7 @@ RUN apt-get update \
 	  zip \
 	  procps \
 	  man-db \
+	  parallel \
 	  # Development and Debugging \
 	  git \
 	  httpie \
