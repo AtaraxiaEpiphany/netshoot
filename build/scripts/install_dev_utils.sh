@@ -83,11 +83,13 @@ curl -fsSL https://claude.ai/install.sh | bash
 claude plugin marketplace add anthropics/skills
 claude plugin marketplace add anthropics/claude-plugins-official
 claude plugin marketplace add obra/superpowers-marketplace
+claude plugin marketplace add OthmanAdi/planning-with-files
 #claude plugin install document-skills@anthropic-agent-skills
 #claude plugin install example-skills@anthropic-agent-skills
 
 
 pipx install superclaude && superclaude install
+npm install -g @fission-ai/openspec@latest
 npm install -g @musistudio/claude-code-router
 npm install -g @mariozechner/claude-trace
 
