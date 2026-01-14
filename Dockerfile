@@ -133,6 +133,10 @@ RUN apt-get update \
 	  gping \
 	  \
 	  # VNC server related \
+	  tracker \
+	  dbus \
+	  dbus-x11 \
+	  gnome-session \
 	  xdg-utils \
 	  libx11-dev \
 	  libxext-dev \
