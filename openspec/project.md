@@ -121,7 +121,7 @@ Netshoot is a comprehensive Docker container image packed with network troublesh
   - Human-readable size parsing (K, M, G suffixes)
   - File reassembly with verification
   - Cleanup functionality
-  - Progress tracking with `pv` (pipe viewer) when available
+  - Progress tracking during both splitting and verification with `pv` (pipe viewer) when available
 - **Dependencies**: split, cat, sha256sum, wc, stat (optional: pv for progress tracking)
 
 ## Domain Context

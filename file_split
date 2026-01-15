@@ -296,7 +296,13 @@ verify_and_reassemble() {
     cat "$output_dir/${CHUNK_PREFIX:-$DEFAULT_CHUNK_PREFIX}"* > "$reassembled_file"
 
     # Verify reassembled file checksum
-    local reassembled_checksum=$(generate_checksum "$reassembled_file")
+    local reassembled_checksum
+    if [[ "$PV_AVAILABLE" == true ]]; then
+        log_info "Verifying reassembled checksum with progress..."
+        reassembled_checksum=$(pv -pterb "$reassembled_file" | "$CHECKSUM_ALGORITHM" | cut -d' ' -f1)
+    else
+        reassembled_checksum=$(generate_checksum "$reassembled_file")
+    fi
 
     if [[ "$reassembled_checksum" == "$ORIGINAL_CHECKSUM" ]]; then
         log_success "File reassembled successfully"

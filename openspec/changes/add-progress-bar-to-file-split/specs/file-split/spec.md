@@ -3,10 +3,11 @@
 ## MODIFIED Requirements
 
 ### Requirement: PROG-01: Progress Tracking during Splitting
-- **Description**: The file_split script SHALL provide progress tracking during the file splitting operation when the `pv` tool is available.
+- **Description**: The file_split script SHALL provide progress tracking during both file splitting and checksum verification operations when the `pv` tool is available.
 - **Constraints**: MUST maintain existing functionality when pv is not available.
 - **Acceptance Criteria**:
   - Progress bar SHALL be displayed during splitting when pv is available
+  - Progress bar SHALL be displayed during reassembled checksum verification when pv is available
   - Operation SHALL continue normally without progress bar when pv is unavailable
   - A warning SHALL be logged when pv is not available
 
