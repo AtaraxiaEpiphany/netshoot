@@ -65,6 +65,14 @@ check_dependencies() {
             error_exit "Required command '$cmd' not found"
         fi
     done
+
+    # Check if pv (pipe viewer) is available for progress tracking (optional)
+    if command -v pv &> /dev/null; then
+        PV_AVAILABLE=true
+    else
+        PV_AVAILABLE=false
+        log_warning "pv (pipe viewer) not found. Progress tracking will be disabled."
+    fi
 }
 
 # Convert human-readable size to bytes
@@ -178,9 +186,15 @@ EOF
     # Get absolute path before changing directory
     local abs_input_file="$(realpath "$input_file")"
 
-    # Split the file
+    # Split the file with progress tracking
     cd "$output_dir"
-    split -b "$chunk_size" "$abs_input_file" "$chunk_prefix"
+    if [[ "$PV_AVAILABLE" == true ]]; then
+        log_info "Splitting with progress tracking..."
+        pv -pterb "$abs_input_file" | split -b "$chunk_size" - "$chunk_prefix"
+    else
+        log_info "Splitting without progress tracking..."
+        split -b "$chunk_size" "$abs_input_file" "$chunk_prefix"
+    fi
 
     # Generate checksums for each chunk
     local chunk_count=0
