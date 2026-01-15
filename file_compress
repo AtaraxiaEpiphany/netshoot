@@ -106,13 +106,13 @@ compress() {
         # Prepare base options for each format
         case "$format" in
             gzip)
-                gzip -$level || error "Gzip compression failed"
+                gzip -$level - || error "Gzip compression failed"
                 ;;
             bzip2)
-                bzip2 -$level || error "Bzip2 compression failed"
+                bzip2 -$level - || error "Bzip2 compression failed"
                 ;;
             xz)
-                xz -$level || error "XZ compression failed"
+                xz -$level - || error "XZ compression failed"
                 ;;
             zstd)
                 local zstd_opts=""
@@ -127,7 +127,7 @@ compress() {
                     zstd_opts="-$level"
                 fi
 
-                zstd $zstd_opts --threads=$threads || error "Zstd compression failed"
+                zstd $zstd_opts --threads=$threads - || error "Zstd compression failed"
                 ;;
             none)
                 cat
