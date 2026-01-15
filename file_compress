@@ -106,25 +106,13 @@ compress() {
         # Prepare base options for each format
         case "$format" in
             gzip)
-                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
-                    pv -pterb "$input_file" 2>/dev/null | gzip -$level || error "Gzip compression failed"
-                else
-                    gzip -$level || error "Gzip compression failed"
-                fi
+                gzip -$level || error "Gzip compression failed"
                 ;;
             bzip2)
-                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
-                    pv -pterb "$input_file" 2>/dev/null | bzip2 -$level || error "Bzip2 compression failed"
-                else
-                    bzip2 -$level || error "Bzip2 compression failed"
-                fi
+                bzip2 -$level || error "Bzip2 compression failed"
                 ;;
             xz)
-                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
-                    pv -pterb "$input_file" 2>/dev/null | xz -$level || error "XZ compression failed"
-                else
-                    xz -$level || error "XZ compression failed"
-                fi
+                xz -$level || error "XZ compression failed"
                 ;;
             zstd)
                 local zstd_opts=""
@@ -139,11 +127,7 @@ compress() {
                     zstd_opts="-$level"
                 fi
 
-                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
-                    pv -pterb "$input_file" 2>/dev/null | zstd $zstd_opts --threads=$threads || error "Zstd compression failed"
-                else
-                    zstd $zstd_opts --threads=$threads || error "Zstd compression failed"
-                fi
+                zstd $zstd_opts --threads=$threads || error "Zstd compression failed"
                 ;;
             none)
                 cat
@@ -159,7 +143,7 @@ compress() {
         # If pv is available, use it with progress bar
         if [[ $use_pv -eq 1 && -n "$input_file" ]]; then
             verbose "Compressing with progress bar..."
-            pv -pterb -s "$total_size" "$input_file" 2>/dev/null | perform_compression
+            pv -pterb -s "$total_size" "$input_file" | perform_compression
         else
             verbose "No progress bar available. Compressing..."
             perform_compression < "$input_file"
@@ -171,21 +155,7 @@ compress() {
     verbose "Input source: $input"
 
     # Ensure we handle both stdin and file inputs
-    if [[ "$input" == "-" ]]; then
-        # Ensure stdin is not a terminal
-        if [ -t 0 ]; then
-            error "No input provided via stdin (terminal input)"
-        fi
-
-        # Read stdin
-        perform_compression
-    else
-        # Use file input
-        if [[ ! -f "$input" ]]; then
-            error "Input file not found: $input"
-        fi
-        perform_compression < "$input"
-    fi
+    wrapped_compression
 }
 
 # Print usage information
