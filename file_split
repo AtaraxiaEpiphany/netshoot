@@ -370,6 +370,12 @@ OPTIONS:
   -v, --verbose        Enable verbose output
   -h, --help           Show this help message
 
+COMBINED OPTIONS:
+  Short options can be combined for convenience:
+    -vd                 Equivalent to -v -d (verbose dry run)
+    -vfo /tmp           Equivalent to -v -f -o /tmp (verbose force output to /tmp)
+    -vp part_           Equivalent to -v -p part_ (verbose with custom prefix)
+
 SIZE FORMAT:
   Use K, M, or G suffix for kilobyte, megabyte, or gigabyte
   Examples: 10K, 100M, 1G, 500 (bytes)
@@ -381,20 +387,41 @@ EXAMPLES:
   # Split with custom output directory and prefix
   $0 -o /tmp/split -p part_ split largefile.dat 100M
 
-  # Verify split files
-  $0 verify /tmp/split
+  # Split with combined options (verbose, force create dir, custom output)
+  $0 -vfo /tmp/new split largefile.dat 10M
 
-  # Cleanup generated files
-  $0 cleanup /tmp/split
+  # Dry run with verbose output using combined options
+  $0 -vd split largefile.dat 1G
 
-  # Dry run to see what would happen
-  $0 -d split largefile.dat 1G
+  # Verify with verbose output using combined option
+  $0 -v verify /tmp/split
+
+  # Cleanup with dry run using combined options
+  $0 -vd cleanup /tmp/split
 
 EOF
 }
 
 # Parse command line arguments
 parse_arguments() {
+    # Pre-process combined short options like -vd -> -v -d
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" =~ ^-[a-zA-Z0-9]{2,}$ ]]; then
+            # Process combined flags like -vo
+            local flags="${1:1}"  # Remove the leading dash
+            for ((i=0; i<${#flags}; i++)); do
+                args+=("-"${flags:$i:1})
+            done
+        else
+            args+=("$1")
+        fi
+        shift
+    done
+
+    # Reset positional parameters to the processed arguments
+    set -- "${args[@]}"
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -d|--dry-run)
