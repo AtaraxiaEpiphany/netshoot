@@ -187,9 +187,12 @@ Options:
   -o, --output FILE         Output file path
                              Default: stdout
   -v, --verbose             Show detailed compression info
+  -d, --dry-run             Simulate compression without writing output
   -h, --help                Display this help message
   --version                 Show script version
-  --dry-run                 Simulate compression without writing output
+
+Combined options:
+  Short options can be combined, e.g., '-vd' for verbose + dry-run mode
 
 Examples:
   echo 'hello' | $0                  # Max zstd compression
@@ -207,7 +210,22 @@ EOF
 
 # Parse command-line arguments
 parse_args() {
-    TEMP=$(getopt -o c:l:j:o:vh --long compression:,level:,threads:,output:,verbose,help,version,dry-run -n "$0" -- "$@")
+    # Pre-process combined short options like -vd -> -v -d
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" =~ ^-[^-].{2,}$ ]]; then
+            # Process combined flags like -vo
+            local flags="${1:1}"  # Remove the leading dash
+            for ((i=0; i<${#flags}; i++)); do
+                args+=("-"${flags:$i:1})
+            done
+        else
+            args+=("$1")
+        fi
+        shift
+    done
+
+    TEMP=$(getopt -o c:l:j:o:vdh --long compression:,level:,threads:,output:,verbose,dry-run,help,version -n "$0" -- "${args[@]}")
 
     if [ $? != 0 ] ; then error "Terminating..." >&2 ; exit 1 ; fi
 
@@ -235,16 +253,16 @@ parse_args() {
                 VERBOSE=1
                 shift
                 ;;
+            -d|--dry-run)
+                DRY_RUN=1
+                shift
+                ;;
             -h|--help)
                 usage
                 ;;
             --version)
                 echo "chunkit version $VERSION"
                 exit 0
-                ;;
-            --dry-run)
-                DRY_RUN=1
-                shift
                 ;;
             --)
                 shift
@@ -264,18 +282,21 @@ parse_args() {
         # Input file specified
         INPUT_FILE="$1"
 
-        # Enhanced file check with more detailed error messages
-        if [ ! -e "$INPUT_FILE" ]; then
-            error "Input file or directory does not exist: $INPUT_FILE"
-        elif [ ! -f "$INPUT_FILE" ]; then
-            # Additional check for file type
-            if [ -d "$INPUT_FILE" ]; then
-                error "Input is a directory, not a file: $INPUT_FILE"
-            else
-                error "Input is not a regular file: $INPUT_FILE"
+        # Skip file checks for stdin
+        if [ "$INPUT_FILE" != "-" ]; then
+            # Enhanced file check with more detailed error messages
+            if [ ! -e "$INPUT_FILE" ]; then
+                error "Input file or directory does not exist: $INPUT_FILE"
+            elif [ ! -f "$INPUT_FILE" ]; then
+                # Additional check for file type
+                if [ -d "$INPUT_FILE" ]; then
+                    error "Input is a directory, not a file: $INPUT_FILE"
+                else
+                    error "Input is not a regular file: $INPUT_FILE"
+                fi
+            elif [ ! -r "$INPUT_FILE" ]; then
+                error "Input file is not readable: $INPUT_FILE"
             fi
-        elif [ ! -r "$INPUT_FILE" ]; then
-            error "Input file is not readable: $INPUT_FILE"
         fi
     else
         error "Too many arguments. Use -h for help."
