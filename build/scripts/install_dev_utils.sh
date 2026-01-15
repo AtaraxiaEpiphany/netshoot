@@ -85,6 +85,8 @@ claude plugin marketplace add anthropics/claude-plugins-official
 claude plugin marketplace add obra/superpowers-marketplace
 claude plugin marketplace add OthmanAdi/planning-with-files
 claude plugin marketplace add K-Dense-AI/claude-scientific-skills
+claude plugin marketplace add jarrodwatts/claude-hud
+
 #claude plugin install document-skills@anthropic-agent-skills
 #claude plugin install example-skills@anthropic-agent-skills
 
