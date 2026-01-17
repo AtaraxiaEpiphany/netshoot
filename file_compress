@@ -127,7 +127,7 @@ compress() {
                     zstd_opts="-$level"
                 fi
 
-                zstd $zstd_opts --threads=$threads - || error "Zstd compression failed"
+                zstd $zstd_opts --threads=$threads --progress - || error "Zstd compression failed"
                 ;;
             none)
                 cat
@@ -140,8 +140,11 @@ compress() {
 
     # Progress wrapper
     wrapped_compression() {
-        # If pv is available, use it with progress bar
-        if [[ $use_pv -eq 1 && -n "$input_file" ]]; then
+        # For zstd, use built-in --progress instead of pv to avoid duplicate progress
+        if [[ "$format" == "zstd" ]]; then
+            verbose "Compressing with zstd progress tracking..."
+            perform_compression < "$input_file"
+        elif [[ $use_pv -eq 1 && -n "$input_file" ]]; then
             verbose "Compressing with progress bar..."
             pv -pterb -s "$total_size" "$input_file" | perform_compression
         else
@@ -311,22 +314,23 @@ validate_inputs() {
         *) error "Unsupported compression format: $COMPRESSION" ;;
     esac
 
-    # Validate compression level
-    case "$COMPRESSION" in
-        zstd)
-            [[ "$COMPRESSION_LEVEL" -lt -100 || "$COMPRESSION_LEVEL" -gt 22 ]] &&
-                error "Zstd level must be between -100 and 22"
-            ;;
-        *)
-            [[ "$COMPRESSION_LEVEL" -lt 1 || "$COMPRESSION_LEVEL" -gt 9 ]] &&
-                error "Compression level must be between 1 and 9"
-            ;;
-    esac
+    # Set appropriate default compression level based on format
+    if [[ "$COMPRESSION" == "zstd" ]]; then
+        # Default for zstd is 22 (max), but allow -100 to 22
+        [[ "$COMPRESSION_LEVEL" -lt -100 || "$COMPRESSION_LEVEL" -gt 22 ]] &&
+            error "Zstd level must be between -100 and 22"
+    else
+        # For other formats, ensure level is between 1-9, default to 9 if necessary
+        if [[ "$COMPRESSION_LEVEL" -lt 1 || "$COMPRESSION_LEVEL" -gt 9 ]]; then
+            verbose "Compression level $COMPRESSION_LEVEL invalid for $COMPRESSION. Using default level 9."
+            COMPRESSION_LEVEL=9
+        fi
+    fi
 
     # Validate threads
     [[ ! "$THREADS" =~ ^[0-9]+$ ]] && error "Threads must be a positive integer"
 
-    # Default to max compression for all formats
+    # Default to max compression for specific cases
     if [[ "$COMPRESSION" == "zstd" && "$COMPRESSION_LEVEL" -eq 10 ]]; then
         COMPRESSION_LEVEL=22  # Maximum zstd compression
     elif [[ "$COMPRESSION" != "zstd" && "$COMPRESSION_LEVEL" -eq 6 ]]; then
