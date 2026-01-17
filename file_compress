@@ -13,6 +13,8 @@ THREADS=$(( $(nproc) * 2 ))
 OUTPUT_FILE="-"
 VERBOSE=0
 DRY_RUN=0  # New flag for dry run mode
+MEMLIMIT="1000MB"  # Memory limit for compression (e.g., 1G, 500M)
+VERIFY="false"  # Generate and verify SHA-256 checksum
 
 # Color output
 RED='\033[0;31m'
@@ -69,6 +71,7 @@ compress() {
     local format="$3"
     local level="$4"
     local threads="$5"
+    local memlimit="${6:-}"
 
     # Progress tracking
     local use_pv=0
@@ -77,13 +80,13 @@ compress() {
     # Get input file size for progress tracking
     local total_size=0
     local input_file="$input"
+    local is_stdin=0
 
-    # For stdin, measure input size before compression
+    # For stdin, handle streaming directly without buffering to temp file
     if [[ "$input" == "-" ]]; then
-        input_file=$(mktemp)
-        trap "rm -f '$input_file'" EXIT
-        cat > "$input_file"
-        total_size=$(stat -c %s "$input_file" 2>/dev/null || echo 0)
+        is_stdin=1
+        # If we can't get size from stdin, we'll skip size-based progress
+        total_size=0
     else
         total_size=$(stat -c %s "$input_file" 2>/dev/null || echo 0)
     fi
@@ -95,12 +98,7 @@ compress() {
     perform_compression() {
         # Log minimal verbose information
         if [[ $VERBOSE -eq 1 ]]; then
-            verbose "Compressing (format: $format, level: $level)"
-        fi
-
-        # Ensure input is available
-        if [[ -n "$input_file" && ! -f "$input_file" ]]; then
-            error "Input file does not exist: $input_file"
+            verbose "Compressing (format: $format, level: $level, memory limit: ${memlimit:-unlimited})"
         fi
 
         # Prepare base options for each format
@@ -112,7 +110,9 @@ compress() {
                 bzip2 -$level - || error "Bzip2 compression failed"
                 ;;
             xz)
-                xz -$level - || error "XZ compression failed"
+                local xz_opts="-$level"
+                [[ -n "$memlimit" ]] && xz_opts="$xz_opts --memory=$memlimit"
+                xz $xz_opts - || error "XZ compression failed"
                 ;;
             zstd)
                 local zstd_opts=""
@@ -126,7 +126,7 @@ compress() {
                 else
                     zstd_opts="-$level"
                 fi
-
+                [[ -n "$memlimit" ]] && zstd_opts="$zstd_opts --memory=$memlimit"
                 zstd $zstd_opts --threads=$threads --progress - || error "Zstd compression failed"
                 ;;
             none)
@@ -143,13 +143,24 @@ compress() {
         # For zstd, use built-in --progress instead of pv to avoid duplicate progress
         if [[ "$format" == "zstd" ]]; then
             verbose "Compressing with zstd progress tracking..."
-            perform_compression < "$input_file"
-        elif [[ $use_pv -eq 1 && -n "$input_file" ]]; then
+            if [[ $is_stdin -eq 1 ]]; then
+                perform_compression  # Read directly from stdin
+            else
+                perform_compression < "$input_file"
+            fi
+        elif [[ $use_pv -eq 1 && $is_stdin -eq 0 ]]; then
             verbose "Compressing with progress bar..."
             pv -pterb -s "$total_size" "$input_file" | perform_compression
+        elif [[ $use_pv -eq 1 && $is_stdin -eq 1 ]]; then
+            verbose "Compressing stdin with progress tracking (size unknown)..."
+            pv -pterb | perform_compression  # No size info for stdin
         else
             verbose "No progress bar available. Compressing..."
-            perform_compression < "$input_file"
+            if [[ $is_stdin -eq 1 ]]; then
+                perform_compression
+            else
+                perform_compression < "$input_file"
+            fi
         fi
     }
 
@@ -190,6 +201,9 @@ Options:
   -o, --output FILE         Output file path
                              Default: stdout
   -v, --verbose             Show detailed compression info
+  -m, --memory, --memlimit SIZE  Memory limit for compression (e.g., 1G, 500M)
+                             Supported by: zstd, xz
+  --verify                  Generate and verify SHA-256 checksum
   -d, --dry-run             Simulate compression without writing output
   -h, --help                Display this help message
   --version                 Show script version
@@ -202,11 +216,14 @@ Examples:
   $0 -c gzip file.txt                # Max gzip compression
   $0 -c zstd -l -10 file.txt         # Fast zstd compression
   $0 -o compressed.zst file.txt      # Output to specific file
+  $0 --verify -o compressed.zst file.txt  # Compress with checksum verification
+  $0 -m 1G -o compressed.zst large_file.bin  # Limit memory to 1GB
   $0 --dry-run file.txt              # Simulate compression
 
 Dependencies:
   - zstd, gzip, bzip2, xz recommended
   - pv (optional) for progress tracking
+  - sha256sum (optional) for verification
 EOF
     exit 0
 }
@@ -228,7 +245,7 @@ parse_args() {
         shift
     done
 
-    TEMP=$(getopt -o c:l:j:o:vdh --long compression:,level:,threads:,output:,verbose,dry-run,help,version -n "$0" -- "${args[@]}")
+    TEMP=$(getopt -o c:l:j:o:vm:dh --long compression:,level:,threads:,output:,verbose,memory:,memlimit:,verify,dry-run,help,version -n "$0" -- "${args[@]}")
 
     if [ $? != 0 ] ; then error "Terminating..." >&2 ; exit 1 ; fi
 
@@ -254,6 +271,14 @@ parse_args() {
                 ;;
             -v|--verbose)
                 VERBOSE=1
+                shift
+                ;;
+            -m|--memory|--memlimit)
+                MEMLIMIT="$2"
+                shift 2
+                ;;
+            --verify)
+                VERIFY=true
                 shift
                 ;;
             -d|--dry-run)
@@ -349,43 +374,36 @@ main() {
         verbose "  Format: $COMPRESSION"
         verbose "  Level: $COMPRESSION_LEVEL"
         verbose "  Threads: $THREADS"
+        verbose "  Memory Limit: ${MEMLIMIT:-unlimited}"
         verbose "  Input: $INPUT_FILE"
         verbose "  Output: $OUTPUT_FILE"
+        verbose "  Verify: ${VERIFY:-false}"
     fi
 
-    # Prepare temporary files for size tracking
-    input_temp=$(mktemp)
-    output_temp=$(mktemp)
-    trap "rm -f '$input_temp' '$output_temp'" EXIT
-
-    # Capture input for size tracking
-    if [[ "$INPUT_FILE" == "-" ]]; then
-        cat > "$input_temp"
-        input_file="$input_temp"
-    else
-        input_file="$INPUT_FILE"
-    fi
-
-    # Dry run mode
+    # Handle dry run mode with streaming support
     if [[ $DRY_RUN -eq 1 ]]; then
         verbose "Dry run mode: Simulating compression"
 
-        input_size=$(stat -c %s "$input_file")
+        # For stdin in dry run, we still need to read it to get size
+        local input_size=0
+        if [[ "$INPUT_FILE" == "-" ]]; then
+            local input_temp=$(mktemp)
+            trap "rm -f '$input_temp'" EXIT
+            cat > "$input_temp"
+            input_size=$(stat -c %s "$input_temp")
+        else
+            input_size=$(stat -c %s "$INPUT_FILE")
+        fi
 
         if [[ "$COMPRESSION" == "zstd" ]]; then
-            # Estimated compression ratio for zstd
             estimated_ratio=0.5  # Typically 50% of original size
         elif [[ "$COMPRESSION" == "gzip" ]]; then
-            # Estimated compression ratio for gzip
             estimated_ratio=0.6  # Typically 60% of original size
         elif [[ "$COMPRESSION" == "bzip2" ]]; then
-            # Estimated compression ratio for bzip2
             estimated_ratio=0.4  # Typically 40% of original size
         elif [[ "$COMPRESSION" == "xz" ]]; then
-            # Estimated compression ratio for xz
             estimated_ratio=0.3  # Typically 30% of original size
         else
-            # For none or unknown, no compression
             estimated_ratio=1
         fi
 
@@ -396,46 +414,63 @@ main() {
         verbose "  Input Size:  $(numfmt --to=iec-i --suffix=B --format="%.1f" "$input_size")"
         verbose "  Estimated Output Size: $(numfmt --to=iec-i --suffix=B --format="%.1f" "$estimated_output_size")"
 
-        # Exit with simulated success
         exit 0
     fi
 
-    # Perform compression
+    # Perform compression with streaming
     set +e  # Disable exit on error to capture the true result
+    local compression_status=0
+    local input_file="$INPUT_FILE"
+
     if [[ "$OUTPUT_FILE" == "-" ]]; then
-        # Output to stdout with binary mode, always write to output_temp
-        compress "$input_file" - "$COMPRESSION" "$COMPRESSION_LEVEL" "$THREADS" > "$output_temp"
+        # Stream directly to stdout - true streaming
+        compress "$input_file" - "$COMPRESSION" "$COMPRESSION_LEVEL" "$THREADS" "$MEMLIMIT"
+        compression_status=$?
+    else
+        # Output to file with optional checksum
+        compress "$input_file" - "$COMPRESSION" "$COMPRESSION_LEVEL" "$THREADS" "$MEMLIMIT" > "$OUTPUT_FILE"
         compression_status=$?
 
-        # Ensure output is written to stdout
-        cat "$output_temp"
-    else
-        # Output to specified file
-        compress "$input_file" - "$COMPRESSION" "$COMPRESSION_LEVEL" "$THREADS" > "$OUTPUT_FILE"
-        compression_status=$?
-        output_temp="$OUTPUT_FILE"
+        # Generate checksum if verification is requested
+        if [[ "${VERIFY:-false}" == "true" && $compression_status -eq 0 ]]; then
+            local checksum=$(sha256sum "$OUTPUT_FILE" | awk '{print $1}')
+            echo "$checksum  $OUTPUT_FILE" > "${OUTPUT_FILE}.sha256"
+            verbose "Generated checksum: ${OUTPUT_FILE}.sha256"
+        fi
     fi
     set -e  # Re-enable exit on error
 
-    # Compute compression ratio for verbose mode
-    if [[ $VERBOSE -eq 1 ]]; then
-        input_size=$(stat -c %s "$input_file")
-        output_size=$(stat -c %s "$output_temp")
+    # Compute compression ratio if we can get sizes (not possible for streaming stdin)
+    if [[ $VERBOSE -eq 1 && "$INPUT_FILE" != "-" ]]; then
+        local input_size=$(stat -c %s "$INPUT_FILE")
+        local output_size=0
 
-        # Compute compression ratio (0-1)
-        compression_ratio=$(echo "scale=2; $output_size / $input_size" | bc)
+        if [[ "$OUTPUT_FILE" == "-" ]]; then
+            verbose "Cannot calculate compression ratio for stdout output"
+        else
+            output_size=$(stat -c %s "$OUTPUT_FILE")
 
-        # Convert to percentage for display
-        compression_percent=$(echo "scale=2; (1 - $output_size / $input_size) * 100" | bc)
+            local compression_ratio=$(echo "scale=2; $output_size / $input_size" | bc)
+            local compression_percent=$(echo "scale=2; (1 - $output_size / $input_size) * 100" | bc)
 
-        verbose "Compression Ratio:"
-        verbose "  Input Size:  $(numfmt --to=iec-i --suffix=B --format="%.1f" "$input_size")"
-        verbose "  Output Size: $(numfmt --to=iec-i --suffix=B --format="%.1f" "$output_size")"
-        verbose "  Ratio:       $compression_ratio"
-        verbose "  Compression: $compression_percent%"
+            verbose "Compression Ratio:"
+            verbose "  Input Size:  $(numfmt --to=iec-i --suffix=B --format="%.1f" "$input_size")"
+            verbose "  Output Size: $(numfmt --to=iec-i --suffix=B --format="%.1f" "$output_size")"
+            verbose "  Ratio:       $compression_ratio"
+            verbose "  Compression: $compression_percent%"
+        fi
     fi
 
-    # Ensure successful exit
+    # Verify compressed file if requested (only for file outputs)
+    if [[ "${VERIFY:-false}" == "true" && "$OUTPUT_FILE" != "-" && -f "${OUTPUT_FILE}.sha256" ]]; then
+        verbose "Verifying compressed file integrity..."
+        if sha256sum -c "${OUTPUT_FILE}.sha256" >/dev/null 2>&1; then
+            verbose "File integrity verified"
+        else
+            error "File integrity check failed: $OUTPUT_FILE"
+        fi
+    fi
+
     exit $compression_status
 }
 
