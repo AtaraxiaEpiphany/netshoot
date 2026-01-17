@@ -127,12 +127,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## jqplayground
 npm install -g next
-mkdir -p ~/Workspaces/Projects \
-	&& cd ~/Workspaces/Projects/ \
-	&& git clone --depth=1 https://github.com/jqlang/playground \
-	&& cd playground \
-	&& npm install \
-	&& npm run build
+mkdir -p ~/Workspaces/Projects 
+	#&& cd ~/Workspaces/Projects/ 
+	#&& git clone --depth=1 https://github.com/jqlang/playground \
+	#&& cd playground \
+	#&& npm install \
+	#&& npm run build
 
 ## mcat: install first to load cargo env
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Skardyy/mcat/releases/download/v0.4.6/mcat-installer.sh | sh
