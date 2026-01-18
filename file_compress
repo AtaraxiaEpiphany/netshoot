@@ -593,8 +593,8 @@ main() {
         local compression_percent=$(echo "scale=2; (1 - $output_size / $input_size) * 100" | bc)
 
         verbose "Compression Ratio:"
-        verbose "  Input Size:  $(numfmt --to=iec-i --suffix=B --format=\"%.1f\" \"$input_size\")"
-        verbose "  Output Size: $(numfmt --to=iec-i --suffix=B --format=\"%.1f\" \"$output_size\")"
+        verbose "  Input Size:  $(numfmt --to=iec-i --suffix=B --format=%.1f $input_size)"
+        verbose "  Output Size: $(numfmt --to=iec-i --suffix=B --format=%.1f $output_size)"
         verbose "  Ratio:       $compression_ratio"
         verbose "  Compression: $compression_percent%"
     fi
