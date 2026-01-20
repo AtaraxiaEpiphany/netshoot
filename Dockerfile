@@ -90,6 +90,7 @@ RUN apt-get update \
 	  #curlie \
 	  ltrace \
 	  openssh-client \
+	  openssh-server \
 	  perl \
 	  python3 \
 	  python3-pip \
