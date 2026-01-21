@@ -94,6 +94,7 @@ claude plugin marketplace add kepano/obsidian-skills
 
 pipx install superclaude && superclaude install
 npm install -g @fission-ai/openspec@latest
+npm install -g @anthropic-ai/claude-code
 npm install -g @musistudio/claude-code-router
 npm install -g @mariozechner/claude-trace
 
