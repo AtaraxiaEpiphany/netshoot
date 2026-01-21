@@ -59,6 +59,7 @@ RUN apt-get update \
 	  socat \
 	  speedtest-cli \
 	  tcpdump \
+	  tcpflow \
 	  tcptraceroute \
 	  traceroute \
 	  \
@@ -125,6 +126,7 @@ RUN apt-get update \
 	  net-tools \
 	  scapy \
 	  tshark \
+	  mitmproxy \
 	  \
 	  # Modern unix \
 	  bat \
