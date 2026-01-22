@@ -85,6 +85,8 @@ RUN apt-get update \
 	  procps \
 	  man-db \
 	  parallel \
+	  bsdiff \
+	  xdelta3 \
 	  # Development and Debugging \
 	  git \
 	  httpie \
