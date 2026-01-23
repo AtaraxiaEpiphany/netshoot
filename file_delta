@@ -7,6 +7,10 @@ set -euo pipefail
 
 VERSION="1.0.0"
 
+# ============================================================================
+# Configuration and Constants
+# ============================================================================
+
 # Default settings
 DELTA_METHOD="xdelta3"  # Choices: xdelta3, bsdiff, rsync
 VERBOSE=0
@@ -17,6 +21,23 @@ COMPRESSION_LEVEL=9
 RSYNC_COMPRESS=1      # Enable rsync compression during transfer (default for rsync)
 RSYNC_COMPRESS_LEVEL=1  # Default compression level
 
+# Supported methods and formats
+SUPPORTED_METHODS="xdelta3|bsdiff|rsync"
+SUPPORTED_COMPRESSION="zstd|gzip|bzip2|xz|none"
+
+# Compression level ranges
+ZSTD_MIN_LEVEL=-100
+ZSTD_MAX_LEVEL=22
+STD_MIN_LEVEL=1
+STD_MAX_LEVEL=9
+
+# Exit codes
+EXIT_SUCCESS=0
+EXIT_ERROR=1
+EXIT_MISSING_DEPS=2
+EXIT_INVALID_INPUT=3
+EXIT_OPERATION_FAILED=4
+
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -24,10 +45,15 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'       # No Color
 
+# ============================================================================
+# Logging Functions
+# ============================================================================
+
 # Error logging
 error() {
-    echo -e "${RED}[ERROR]${NC} $*" >&2
-    exit 1
+    local exit_code=${2:-$EXIT_ERROR}
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+    exit $exit_code
 }
 
 # Verbose logging
@@ -35,9 +61,49 @@ verbose() {
     [[ $VERBOSE -eq 1 ]] && echo -e "${BLUE}[VERBOSE]${NC} $*" >&2
 }
 
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
 # Check if command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# Check if path is file or directory
+get_path_type() {
+    local path="$1"
+    if [ -f "$path" ]; then
+        echo "file"
+    elif [ -d "$path" ]; then
+        echo "directory"
+    else
+        error "Path does not exist or is not a file/directory: $path" $EXIT_INVALID_INPUT
+    fi
+}
+
+# ============================================================================
+# Validation Functions
+# ============================================================================
+
+# Validate compression level based on format
+validate_compression_level() {
+    local format="$1"
+    local level="$2"
+
+    if [[ "$format" == "none" ]]; then
+        return 0
+    fi
+
+    if [[ "$format" == "zstd" ]]; then
+        if [[ "$level" -lt $ZSTD_MIN_LEVEL || "$level" -gt $ZSTD_MAX_LEVEL ]]; then
+            error "Zstd level must be between $ZSTD_MIN_LEVEL and $ZSTD_MAX_LEVEL" $EXIT_INVALID_INPUT
+        fi
+    else
+        if [[ "$level" -lt $STD_MIN_LEVEL || "$level" -gt $STD_MAX_LEVEL ]]; then
+            error "Compression level must be between $STD_MIN_LEVEL and $STD_MAX_LEVEL" $EXIT_INVALID_INPUT
+        fi
+    fi
 }
 
 # Setup environment and check dependencies
@@ -52,19 +118,41 @@ setup_environment() {
     done
 
     if [[ ${#missing_tools[@]} -gt 0 ]]; then
-        error "Missing delta tools: ${missing_tools[*]}"
+        error "Missing delta tools: ${missing_tools[*]}" $EXIT_MISSING_DEPS
     fi
 
     # Check compression tools if needed
     if [[ "$COMPRESSION" != "none" ]]; then
         local compression_tools=("zstd" "gzip" "bzip2" "xz")
         if ! command_exists "$COMPRESSION"; then
-            error "Compression tool not found: $COMPRESSION"
+            error "Compression tool not found: $COMPRESSION" $EXIT_MISSING_DEPS
         fi
     fi
 
     verbose "All dependencies verified"
 }
+
+# Validate inputs
+validate_inputs() {
+    # Validate delta method
+    case "$DELTA_METHOD" in
+        xdelta3|bsdiff|rsync) ;;
+        *) error "Unsupported delta method: $DELTA_METHOD" $EXIT_INVALID_INPUT ;;
+    esac
+
+    # Validate compression format
+    case "$COMPRESSION" in
+        zstd|gzip|bzip2|xz|none) ;;
+        *) error "Unsupported compression format: $COMPRESSION" $EXIT_INVALID_INPUT ;;
+    esac
+
+    # Validate compression level
+    validate_compression_level "$COMPRESSION" "$COMPRESSION_LEVEL"
+}
+
+# ============================================================================
+# Delta Method Functions - xdelta3
+# ============================================================================
 
 # Create delta for single file using xdelta3
 create_xdelta() {
@@ -74,7 +162,7 @@ create_xdelta() {
 
     verbose "Creating xdelta3 delta from $old_file to $new_file"
     if [[ $DRY_RUN -eq 0 ]]; then
-        xdelta3 -e -9 -s "$old_file" "$new_file" "$delta_file" || error "xdelta3 delta creation failed"
+        xdelta3 -e -9 -s "$old_file" "$new_file" "$delta_file" || error "xdelta3 delta creation failed" $EXIT_OPERATION_FAILED
     fi
 }
 
@@ -86,9 +174,13 @@ apply_xdelta() {
 
     verbose "Applying xdelta3 delta to $old_file"
     if [[ $DRY_RUN -eq 0 ]]; then
-        xdelta3 -d -s "$old_file" "$delta_file" "$new_file" || error "xdelta3 delta application failed"
+        xdelta3 -d -s "$old_file" "$delta_file" "$new_file" || error "xdelta3 delta application failed" $EXIT_OPERATION_FAILED
     fi
 }
+
+# ============================================================================
+# Delta Method Functions - bsdiff
+# ============================================================================
 
 # Create delta for single file using bsdiff
 create_bsdiff() {
@@ -98,7 +190,7 @@ create_bsdiff() {
 
     verbose "Creating bsdiff delta from $old_file to $new_file"
     if [[ $DRY_RUN -eq 0 ]]; then
-        bsdiff "$old_file" "$new_file" "$delta_file" || error "bsdiff delta creation failed"
+        bsdiff "$old_file" "$new_file" "$delta_file" || error "bsdiff delta creation failed" $EXIT_OPERATION_FAILED
     fi
 }
 
@@ -110,8 +202,24 @@ apply_bsdiff() {
 
     verbose "Applying bsdiff delta to $old_file"
     if [[ $DRY_RUN -eq 0 ]]; then
-        bspatch "$old_file" "$new_file" "$delta_file" || error "bsdiff delta application failed"
+        bspatch "$old_file" "$new_file" "$delta_file" || error "bsdiff delta application failed" $EXIT_OPERATION_FAILED
     fi
+}
+
+# ============================================================================
+# Delta Method Functions - rsync
+# ============================================================================
+
+# Build rsync command with options
+build_rsync_command() {
+    local rsync_command=(rsync --archive --verbose --human-readable --progress --itemize-changes)
+
+    if [[ $RSYNC_COMPRESS -eq 1 ]]; then
+        rsync_command+=(--compress --compress-level=$RSYNC_COMPRESS_LEVEL)
+        verbose "Using rsync compression level: $RSYNC_COMPRESS_LEVEL"
+    fi
+
+    echo "${rsync_command[@]}"
 }
 
 # Create delta for directory using rsync
@@ -124,14 +232,11 @@ create_rsync_delta() {
     if [[ $DRY_RUN -eq 0 ]]; then
         mkdir -p "$delta_dir"
         # Build rsync command with expanded options
-        rsync_command=(rsync --archive --verbose --human-readable --progress --itemize-changes)
-        if [[ $RSYNC_COMPRESS -eq 1 ]]; then
-            rsync_command+=(--compress --compress-level=$RSYNC_COMPRESS_LEVEL)
-            verbose "Using rsync compression level: $RSYNC_COMPRESS_LEVEL"
-        fi
+        local rsync_command
+        rsync_command=($(build_rsync_command))
         rsync_command+=(--checksum --delete "$new_dir/" "$delta_dir/")
         verbose "Executing: ${rsync_command[*]}"
-        "${rsync_command[@]}" || error "rsync delta creation failed"
+        "${rsync_command[@]}" || error "rsync delta creation failed" $EXIT_OPERATION_FAILED
     fi
 }
 
@@ -145,14 +250,33 @@ apply_rsync_delta() {
     if [[ $DRY_RUN -eq 0 ]]; then
         mkdir -p "$new_dir"
         # Build rsync command with expanded options
-        rsync_command=(rsync --archive --verbose --human-readable --progress --itemize-changes)
-        if [[ $RSYNC_COMPRESS -eq 1 ]]; then
-            rsync_command+=(--compress --compress-level=$RSYNC_COMPRESS_LEVEL)
-            verbose "Using rsync compression level: $RSYNC_COMPRESS_LEVEL"
-        fi
+        local rsync_command
+        rsync_command=($(build_rsync_command))
         rsync_command+=("$delta_dir/" "$new_dir/")
         verbose "Executing: ${rsync_command[*]}"
-        "${rsync_command[@]}" || error "rsync delta application failed"
+        "${rsync_command[@]}" || error "rsync delta application failed" $EXIT_OPERATION_FAILED
+    fi
+}
+
+# ============================================================================
+# Compression Functions
+# ============================================================================
+
+# Detect compression format from file type
+detect_compression_format() {
+    local input_file="$1"
+    local file_type=$(file -b "$input_file")
+
+    if echo "$file_type" | grep -q "gzip compressed"; then
+        echo "gzip"
+    elif echo "$file_type" | grep -q "bzip2 compressed"; then
+        echo "bzip2"
+    elif echo "$file_type" | grep -q "XZ compressed"; then
+        echo "xz"
+    elif echo "$file_type" | grep -q "Zstandard compressed"; then
+        echo "zstd"
+    else
+        echo "none"
     fi
 }
 
@@ -167,7 +291,7 @@ compress_delta() {
         if [[ "$input_file" != "$output_file" ]]; then
             verbose "Skipping compression"
             if [[ $DRY_RUN -eq 0 ]]; then
-                cp "$input_file" "$output_file" || error "File copy failed"
+                cp "$input_file" "$output_file" || error "File copy failed" $EXIT_OPERATION_FAILED
             fi
         fi
         return 0
@@ -177,26 +301,26 @@ compress_delta() {
     if [[ $DRY_RUN -eq 0 ]]; then
         case "$format" in
             gzip)
-                gzip -$level -c "$input_file" > "$output_file" || error "gzip compression failed"
+                gzip -$level -c "$input_file" > "$output_file" || error "gzip compression failed" $EXIT_OPERATION_FAILED
                 ;;
             bzip2)
-                bzip2 -$level -c "$input_file" > "$output_file" || error "bzip2 compression failed"
+                bzip2 -$level -c "$input_file" > "$output_file" || error "bzip2 compression failed" $EXIT_OPERATION_FAILED
                 ;;
             xz)
-                xz -$level -c "$input_file" > "$output_file" || error "xz compression failed"
+                xz -$level -c "$input_file" > "$output_file" || error "xz compression failed" $EXIT_OPERATION_FAILED
                 ;;
             zstd)
                 if [[ "$level" -lt 0 ]]; then
                     local fast_level=$((-level))
-                    zstd --fast=$fast_level -c "$input_file" > "$output_file" || error "zstd compression failed"
+                    zstd --fast=$fast_level -c "$input_file" > "$output_file" || error "zstd compression failed" $EXIT_OPERATION_FAILED
                 elif [[ "$level" -gt 19 ]]; then
-                    zstd --ultra -$level -c "$input_file" > "$output_file" || error "zstd compression failed"
+                    zstd --ultra -$level -c "$input_file" > "$output_file" || error "zstd compression failed" $EXIT_OPERATION_FAILED
                 else
-                    zstd -$level -c "$input_file" > "$output_file" || error "zstd compression failed"
+                    zstd -$level -c "$input_file" > "$output_file" || error "zstd compression failed" $EXIT_OPERATION_FAILED
                 fi
                 ;;
             *)
-                error "Unsupported compression format: $format"
+                error "Unsupported compression format: $format" $EXIT_INVALID_INPUT
                 ;;
         esac
     fi
@@ -209,36 +333,33 @@ decompress_delta() {
 
     verbose "Decompressing delta file $input_file"
     if [[ $DRY_RUN -eq 0 ]]; then
-        # Check file type using 'file' command to detect compression
-        local file_type=$(file -b "$input_file")
+        local format=$(detect_compression_format "$input_file")
 
-        if echo "$file_type" | grep -q "gzip compressed"; then
-            gzip -d -c "$input_file" > "$output_file" || error "gzip decompression failed"
-        elif echo "$file_type" | grep -q "bzip2 compressed"; then
-            bzip2 -d -c "$input_file" > "$output_file" || error "bzip2 decompression failed"
-        elif echo "$file_type" | grep -q "XZ compressed"; then
-            xz -d -c "$input_file" > "$output_file" || error "xz decompression failed"
-        elif echo "$file_type" | grep -q "Zstandard compressed"; then
-            zstd -d -c "$input_file" > "$output_file" || error "zstd decompression failed"
-        else
-            # Assume uncompressed
-            verbose "No compression detected, copying directly"
-            cp "$input_file" "$output_file" || error "File copy failed"
-        fi
+        case "$format" in
+            gzip)
+                gzip -d -c "$input_file" > "$output_file" || error "gzip decompression failed" $EXIT_OPERATION_FAILED
+                ;;
+            bzip2)
+                bzip2 -d -c "$input_file" > "$output_file" || error "bzip2 decompression failed" $EXIT_OPERATION_FAILED
+                ;;
+            xz)
+                xz -d -c "$input_file" > "$output_file" || error "xz decompression failed" $EXIT_OPERATION_FAILED
+                ;;
+            zstd)
+                zstd -d -c "$input_file" > "$output_file" || error "zstd decompression failed" $EXIT_OPERATION_FAILED
+                ;;
+            *)
+                # Assume uncompressed
+                verbose "No compression detected, copying directly"
+                cp "$input_file" "$output_file" || error "File copy failed" $EXIT_OPERATION_FAILED
+                ;;
+        esac
     fi
 }
 
-# Check if path is file or directory
-get_path_type() {
-    local path="$1"
-    if [ -f "$path" ]; then
-        echo "file"
-    elif [ -d "$path" ]; then
-        echo "directory"
-    else
-        error "Path does not exist or is not a file/directory: $path"
-    fi
-}
+# ============================================================================
+# Core Operations
+# ============================================================================
 
 # Create delta
 create_delta() {
@@ -248,7 +369,7 @@ create_delta() {
     local path_type=$(get_path_type "$old_path")
 
     if [[ $(get_path_type "$new_path") != "$path_type" ]]; then
-        error "Old and new paths must be the same type (both files or both directories)"
+        error "Old and new paths must be the same type (both files or both directories)" $EXIT_INVALID_INPUT
     fi
 
     # Handle existing delta path
@@ -259,7 +380,7 @@ create_delta() {
                 rm -rf "$delta_path"
             fi
         else
-            error "Delta path already exists: $delta_path. Use -f to force overwrite."
+            error "Delta path already exists: $delta_path. Use -f to force overwrite." $EXIT_INVALID_INPUT
         fi
     fi
 
@@ -278,10 +399,10 @@ create_delta() {
                 create_bsdiff "$old_path" "$new_path" "$temp_delta"
                 ;;
             rsync)
-                error "rsync delta method not supported for single files"
+                error "rsync delta method not supported for single files" $EXIT_INVALID_INPUT
                 ;;
             *)
-                error "Unsupported delta method: $DELTA_METHOD"
+                error "Unsupported delta method: $DELTA_METHOD" $EXIT_INVALID_INPUT
                 ;;
         esac
 
@@ -316,7 +437,7 @@ apply_delta() {
                 rm -rf "$new_path"
             fi
         else
-            error "Target path already exists: $new_path. Use -f to force overwrite."
+            error "Target path already exists: $new_path. Use -f to force overwrite." $EXIT_INVALID_INPUT
         fi
     fi
 
@@ -336,10 +457,10 @@ apply_delta() {
                 apply_bsdiff "$old_path" "$temp_delta" "$new_path"
                 ;;
             rsync)
-                error "rsync delta method not supported for single files"
+                error "rsync delta method not supported for single files" $EXIT_INVALID_INPUT
                 ;;
             *)
-                error "Unsupported delta method: $DELTA_METHOD"
+                error "Unsupported delta method: $DELTA_METHOD" $EXIT_INVALID_INPUT
                 ;;
         esac
 
@@ -348,12 +469,16 @@ apply_delta() {
         if [[ "$DELTA_METHOD" == "rsync" ]]; then
             apply_rsync_delta "$old_path" "$delta_path" "$new_path"
         else
-            error "Directory delta application requires rsync method"
+            error "Directory delta application requires rsync method" $EXIT_INVALID_INPUT
         fi
     fi
 
     verbose "Delta applied successfully: $new_path"
 }
+
+# ============================================================================
+# CLI Interface
+# ============================================================================
 
 # Print usage information
 usage() {
@@ -411,7 +536,7 @@ Dependencies:
   Required: xdelta3, bsdiff (bsdiff/bspatch), rsync
   Optional: zstd, gzip, bzip2, xz (for compression)
 EOF
-    exit 0
+    exit $EXIT_SUCCESS
 }
 
 # Parse command-line arguments
@@ -432,7 +557,7 @@ parse_args() {
 
     TEMP=$(getopt -o m:c:l:vdfhz --long method:,compression:,level:,verbose,dry-run,force,help,version -n "$0" -- "${args[@]}")
 
-    if [ $? != 0 ] ; then error "Terminating..." >&2 ; exit 1 ; fi
+    if [ $? != 0 ] ; then error "Terminating..." $EXIT_ERROR ; exit $EXIT_ERROR ; fi
 
     eval set -- "$TEMP"
 
@@ -476,20 +601,20 @@ parse_args() {
                 ;;
             --version)
                 echo "file_delta version $VERSION"
-                exit 0
+                exit $EXIT_SUCCESS
                 ;;
             --)
                 shift
                 break
                 ;;
             *)
-                error "Internal error!"
+                error "Internal error!" $EXIT_ERROR
                 ;;
         esac
     done
 
     if [ $# -lt 4 ]; then
-        error "Missing arguments. Use -h for help."
+        error "Missing arguments. Use -h for help." $EXIT_INVALID_INPUT
     fi
 
     ACTION="$1"
@@ -500,10 +625,10 @@ parse_args() {
         DELTA_PATH="$4"
 
         if [ ! -e "$OLD_PATH" ]; then
-            error "Old path does not exist: $OLD_PATH"
+            error "Old path does not exist: $OLD_PATH" $EXIT_INVALID_INPUT
         fi
         if [ ! -e "$NEW_PATH" ]; then
-            error "New path does not exist: $NEW_PATH"
+            error "New path does not exist: $NEW_PATH" $EXIT_INVALID_INPUT
         fi
     elif [[ "$ACTION" == "apply" ]]; then
         OLD_PATH="$2"
@@ -511,42 +636,14 @@ parse_args() {
         NEW_PATH="$4"
 
         if [ ! -e "$OLD_PATH" ]; then
-            error "Old path does not exist: $OLD_PATH"
+            error "Old path does not exist: $OLD_PATH" $EXIT_INVALID_INPUT
         fi
         if [ ! -e "$DELTA_PATH" ]; then
-            error "Delta path does not exist: $DELTA_PATH"
+            error "Delta path does not exist: $DELTA_PATH" $EXIT_INVALID_INPUT
         fi
         # Target path (NEW_PATH) will be created, so don't check if it exists
     else
-        error "Invalid action: $ACTION. Must be 'create' or 'apply'."
-    fi
-}
-
-# Validate inputs
-validate_inputs() {
-    # Validate delta method
-    case "$DELTA_METHOD" in
-        xdelta3|bsdiff|rsync) ;;
-        *) error "Unsupported delta method: $DELTA_METHOD" ;;
-    esac
-
-    # Validate compression format
-    case "$COMPRESSION" in
-        zstd|gzip|bzip2|xz|none) ;;
-        *) error "Unsupported compression format: $COMPRESSION" ;;
-    esac
-
-    # Validate compression level
-    if [[ "$COMPRESSION" != "none" ]]; then
-        if [[ "$COMPRESSION" == "zstd" ]]; then
-            if [[ "$COMPRESSION_LEVEL" -lt -100 || "$COMPRESSION_LEVEL" -gt 22 ]]; then
-                error "Zstd level must be between -100 and 22"
-            fi
-        else
-            if [[ "$COMPRESSION_LEVEL" -lt 1 || "$COMPRESSION_LEVEL" -gt 9 ]]; then
-                error "Compression level must be between 1 and 9"
-            fi
-        fi
+        error "Invalid action: $ACTION. Must be 'create' or 'apply'." $EXIT_INVALID_INPUT
     fi
 }
 
@@ -556,7 +653,7 @@ main() {
     validate_inputs
     setup_environment
 
-    verbose "file_delta version $VERSION"
+    verbose "file_delta version version $VERSION"
     verbose "Action: $ACTION"
     verbose "Delta Method: $DELTA_METHOD"
     verbose "Compression: $COMPRESSION"
