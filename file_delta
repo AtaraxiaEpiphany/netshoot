@@ -14,6 +14,8 @@ DRY_RUN=0
 FORCE=0
 COMPRESSION="zstd"  # Compress delta files: zstd, gzip, bzip2, xz, none
 COMPRESSION_LEVEL=9
+RSYNC_COMPRESS=1      # Enable rsync compression during transfer (default for rsync)
+RSYNC_COMPRESS_LEVEL=1  # Default compression level
 
 # Color output
 RED='\033[0;31m'
@@ -121,10 +123,15 @@ create_rsync_delta() {
     verbose "Creating rsync delta from $old_dir to $new_dir"
     if [[ $DRY_RUN -eq 0 ]]; then
         mkdir -p "$delta_dir"
-        # Use rsync to copy changed/new files from new_dir to delta_dir
-        # --checksum: compare files by checksum, not size/time
-        # --ignore-existing: skip files that already exist in delta_dir
-        rsync -av --checksum --delete "$new_dir/" "$delta_dir/" || error "rsync delta creation failed"
+        # Build rsync command with expanded options
+        rsync_command=(rsync --archive --verbose --human-readable --progress --itemize-changes)
+        if [[ $RSYNC_COMPRESS -eq 1 ]]; then
+            rsync_command+=(--compress --compress-level=$RSYNC_COMPRESS_LEVEL)
+            verbose "Using rsync compression level: $RSYNC_COMPRESS_LEVEL"
+        fi
+        rsync_command+=(--checksum --delete "$new_dir/" "$delta_dir/")
+        verbose "Executing: ${rsync_command[*]}"
+        "${rsync_command[@]}" || error "rsync delta creation failed"
     fi
 }
 
@@ -137,7 +144,15 @@ apply_rsync_delta() {
     verbose "Applying rsync delta to $old_dir"
     if [[ $DRY_RUN -eq 0 ]]; then
         mkdir -p "$new_dir"
-        rsync -av "$delta_dir/" "$new_dir/" || error "rsync delta application failed"
+        # Build rsync command with expanded options
+        rsync_command=(rsync --archive --verbose --human-readable --progress --itemize-changes)
+        if [[ $RSYNC_COMPRESS -eq 1 ]]; then
+            rsync_command+=(--compress --compress-level=$RSYNC_COMPRESS_LEVEL)
+            verbose "Using rsync compression level: $RSYNC_COMPRESS_LEVEL"
+        fi
+        rsync_command+=("$delta_dir/" "$new_dir/")
+        verbose "Executing: ${rsync_command[*]}"
+        "${rsync_command[@]}" || error "rsync delta application failed"
     fi
 }
 
@@ -364,6 +379,7 @@ Options:
   -v, --verbose              Show detailed operation info
   -d, --dry-run              Simulate operation without making changes
   -f, --force                Overwrite existing delta/target files
+  -z [LEVEL]                 Enable rsync compression during transfer (optional LEVEL 1-9)
   -h, --help                 Display this help message
   --version                  Show script version
 
@@ -414,7 +430,7 @@ parse_args() {
         shift
     done
 
-    TEMP=$(getopt -o m:c:l:vdfh --long method:,compression:,level:,verbose,dry-run,force,help,version -n "$0" -- "${args[@]}")
+    TEMP=$(getopt -o m:c:l:vdfhz --long method:,compression:,level:,verbose,dry-run,force,help,version -n "$0" -- "${args[@]}")
 
     if [ $? != 0 ] ; then error "Terminating..." >&2 ; exit 1 ; fi
 
@@ -444,6 +460,15 @@ parse_args() {
                 ;;
             -f|--force)
                 FORCE=1
+                shift
+                ;;
+            -z)
+                RSYNC_COMPRESS=1
+                # Check if next argument is a number for compression level
+                if [[ "$2" =~ ^[1-9]$ ]]; then
+                    RSYNC_COMPRESS_LEVEL="$2"
+                    shift
+                fi
                 shift
                 ;;
             -h|--help)
@@ -549,6 +574,11 @@ main() {
         verbose "Dry run completed successfully"
     else
         verbose "Operation completed successfully"
+        if [[ $RSYNC_COMPRESS -eq 1 ]]; then
+            verbose "Rsync compression enabled at level $RSYNC_COMPRESS_LEVEL"
+        else
+            verbose "Rsync compression disabled"
+        fi
     fi
 }
 
