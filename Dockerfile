@@ -91,6 +91,7 @@ RUN apt-get update \
 	  linux-tools-common \
 	  linux-tools-generic \
 	  linux-tools-$(uname -r) \
+	  skopeo \
 	  # Development and Debugging \
 	  git \
 	  httpie \

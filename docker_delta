@@ -110,15 +110,48 @@ setup_environment() {
         missing_tools+=("tar")
     fi
 
+    # Check file_delta in PATH or current directory
     if ! command_exists "file_delta"; then
-        missing_tools+=("file_delta")
+        # Check if file_delta exists in script directory
+        local script_dir
+        script_dir=$(dirname "$(realpath "$0")")
+
+        if [[ -x "$script_dir/file_delta" ]]; then
+            PATH="$script_dir:$PATH"
+            verbose "Using file_delta from script directory"
+        else
+            missing_tools+=("file_delta")
+        fi
     fi
 
     if [[ ${#missing_tools[@]} -gt 0 ]]; then
         error "Missing required tools: ${missing_tools[*]}" $EXIT_MISSING_DEPS
     fi
 
+    # Additional dependency check
+    if ! command_exists "python3"; then
+        error "Python3 is required for JSON processing" $EXIT_MISSING_DEPS
+    fi
+
     verbose "All dependencies verified"
+}
+
+# Attempt Docker operation with retries
+safe_docker_operation() {
+    local cmd="$1"
+    local max_retries=3
+    local retry_wait=2
+
+    for i in $(seq 1 $max_retries); do
+        if $cmd; then
+            return 0
+        else
+            verbose "Docker operation failed (attempt $i/$max_retries), retrying in $retry_wait seconds..."
+            sleep $retry_wait
+        fi
+    done
+
+    error "Docker operation failed after $max_retries attempts" $EXIT_OPERATION_FAILED
 }
 
 # Validate inputs
@@ -152,7 +185,40 @@ extract_image_layers() {
 
     if [[ $DRY_RUN -eq 0 ]]; then
         mkdir -p "$extract_dir"
-        docker save "$image_name" -o "$extract_dir/image.tar" || error "Failed to save Docker image" $EXIT_OPERATION_FAILED
+
+        # Enhanced debug logging
+        verbose "Working directory: $(pwd)"
+        verbose "Docker version: $(docker --version)"
+        verbose "Docker image list:"
+        docker image list | tee docker_images.log
+
+        # Sanitize image name by removing quotes
+        local sanitized_name=$(echo "$image_name" | tr -d '"')
+
+        # Verify image exists first
+        verbose "Checking for image: $sanitized_name"
+        if ! docker image inspect "$sanitized_name" > /dev/null 2>&1; then
+            error "Image '$sanitized_name' not found locally. See docker_images.log for available images." $EXIT_OPERATION_FAILED
+        else
+            verbose "Image found: $sanitized_name"
+            docker image inspect "$sanitized_name" > image_inspect.json
+        fi
+
+        # Use sanitized name for all Docker operations
+        image_name="$sanitized_name"
+
+        # Create the tar archive with debug output
+        verbose "Executing: docker save '$image_name' -o '$extract_dir/image.tar'"
+        docker save "$image_name" -o "$extract_dir/image.tar" 2> docker_save_error.log || {
+            error "Docker save failed. Error output:\n$(cat docker_save_error.log)\n" $EXIT_OPERATION_FAILED
+        }
+
+        # Verify output file
+        if [[ ! -f "$extract_dir/image.tar" ]]; then
+            error "Image tarball not created: $extract_dir/image.tar" $EXIT_OPERATION_FAILED
+        else
+            verbose "Image tarball created: $(du -h "$extract_dir/image.tar" | cut -f1)"
+        fi
 
         # Extract tar contents
         tar -xf "$extract_dir/image.tar" -C "$extract_dir" || error "Failed to extract image tar" $EXIT_OPERATION_FAILED
@@ -243,8 +309,8 @@ create_delta_package() {
     temp_dir=$(mktemp -d)
     trap "rm -rf '$temp_dir'" EXIT
 
-    # Extract image layers
-    extract_image_layers "$image_name" "$temp_dir"
+    # Extract image layers with retry logic
+    safe_docker_operation "extract_image_layers \"$image_name\" \"$temp_dir\""
 
     # Get manifest
     local manifest_file
