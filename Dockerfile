@@ -62,6 +62,7 @@ RUN apt-get update \
 	  tcpflow \
 	  tcptraceroute \
 	  traceroute \
+	  telnet \
 	  \
 	  # System Utilities \
 	  bash \
