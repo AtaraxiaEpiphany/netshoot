@@ -87,6 +87,9 @@ RUN apt-get update \
 	  parallel \
 	  bsdiff \
 	  xdelta3 \
+	  linux-tools-common \
+	  linux-tools-generic \
+	  linux-tools-$(uname -r) \
 	  # Development and Debugging \
 	  git \
 	  httpie \
