@@ -19,6 +19,14 @@ FORCE=0
 COMPRESSION="zstd"  # Compress delta files: zstd, gzip, bzip2, xz, none
 COMPRESSION_LEVEL=9
 
+# Skopeo integration settings
+USE_SKEPEO=0              # Flag for using Skopeo (0 = Docker daemon, 1 = local file)
+IMAGE_FILE=""              # Path to local image file
+SOURCE_FORMAT=""           # Source format: docker-archive, oci-archive
+TARGET_FORMAT=""           # Target format: docker-archive, oci-archive
+PLATFORM_ARCH=""           # Architecture for multi-arch images
+PLATFORM_OS=""            # OS for multi-arch images
+
 # Supported methods and formats
 SUPPORTED_METHODS="xdelta3|bsdiff|layer"
 SUPPORTED_COMPRESSION="zstd|gzip|bzip2|xz|none"
@@ -74,6 +82,54 @@ command_exists() {
 }
 
 # ============================================================================
+# Image Source Detection Functions
+# ============================================================================
+
+# Detect if image source is a local file or Docker daemon image
+detect_image_source() {
+    local source="$1"
+    # Remove quotes if present
+    local cleaned_source=$(echo "$source" | tr -d '"')
+
+    # Debug: Show what we're checking
+    verbose "Checking if '$cleaned_source' exists as a file..."
+    if [[ -f "$cleaned_source" ]]; then
+        USE_SKEPEO=1
+        IMAGE_FILE="$cleaned_source"
+        verbose "Detected local image file: $cleaned_source"
+    else
+        USE_SKEPEO=0
+        verbose "Detected Docker daemon image: $source"
+    fi
+}
+
+# Detect image file format based on file extension
+detect_image_format() {
+    local file="$1"
+
+    if [[ "$file" == *.tar.gz ]] || [[ "$file" == *.tgz ]]; then
+        echo "oci-archive"
+    elif [[ "$file" == *.tar ]]; then
+        echo "docker-archive"
+    else
+        # Default to docker-archive for unknown extensions
+        echo "docker-archive"
+    fi
+}
+
+# Get Skopeo transport URL for image file
+get_skopeo_transport() {
+    local file="$1"
+    local format="${2:-}"
+
+    if [[ -z "$format" ]]; then
+        format=$(detect_image_format "$file")
+    fi
+
+    echo "${format}://${file}"
+}
+
+# ============================================================================
 # Validation Functions
 # ============================================================================
 
@@ -101,9 +157,11 @@ validate_compression_level() {
 setup_environment() {
     local missing_tools=()
 
-    # Check required tools
-    if ! command_exists "docker"; then
-        missing_tools+=("docker")
+    # Check required tools for Docker daemon operations
+    if [[ $USE_SKEPEO -eq 0 ]]; then
+        if ! command_exists "docker"; then
+            missing_tools+=("docker")
+        fi
     fi
 
     if ! command_exists "tar"; then
@@ -122,6 +180,16 @@ setup_environment() {
         else
             missing_tools+=("file_delta")
         fi
+    fi
+
+    # Check Skopeo for local file operations
+    if [[ $USE_SKEPEO -eq 1 ]]; then
+        if ! command_exists "skopeo"; then
+            error "Skopeo is required for local image file operations" $EXIT_MISSING_DEPS
+        fi
+        verbose "Using Skopeo for local image file operations"
+    else
+        verbose "Using Docker daemon for image operations"
     fi
 
     if [[ ${#missing_tools[@]} -gt 0 ]]; then
@@ -176,91 +244,237 @@ validate_inputs() {
 # Docker Image Functions
 # ============================================================================
 
-# Extract Docker image to temporary directory
-extract_image_layers() {
-    local image_name="$1"
+# Extract image layers using Skopeo (for local image files)
+extract_layers_skopeo() {
+    local image_file="$1"
     local extract_dir="$2"
+    local format="${3:-}"
 
-    verbose "Extracting Docker image: $image_name"
+    if [[ -z "$format" ]]; then
+        format=$(detect_image_format "$image_file")
+    fi
+
+    verbose "Extracting layers from local image file: $image_file (format: $format)"
 
     if [[ $DRY_RUN -eq 0 ]]; then
         mkdir -p "$extract_dir"
 
-        # Enhanced debug logging
-        verbose "Working directory: $(pwd)"
-        verbose "Docker version: $(docker --version)"
-        verbose "Docker image list:"
-        docker image list | tee docker_images.log
+        # Debug: Check extract directory creation
+        verbose "Created extract directory: $extract_dir"
+        ls -la "$extract_dir"
 
-        # Sanitize image name by removing quotes
-        local sanitized_name=$(echo "$image_name" | tr -d '"')
+        # Build Skopeo copy command with platform options if specified
+        local skopeo_cmd="skopeo copy --dest-tls-verify=false"
 
-        # Verify image exists first
-        verbose "Checking for image: $sanitized_name"
-        if ! docker image inspect "$sanitized_name" > /dev/null 2>&1; then
-            error "Image '$sanitized_name' not found locally. See docker_images.log for available images." $EXIT_OPERATION_FAILED
-        else
-            verbose "Image found: $sanitized_name"
-            docker image inspect "$sanitized_name" > image_inspect.json
+        if [[ -n "$PLATFORM_ARCH" ]]; then
+            skopeo_cmd="$skopeo_cmd --override-arch=$PLATFORM_ARCH"
         fi
 
-        # Use sanitized name for all Docker operations
-        image_name="$sanitized_name"
-
-        # Create the tar archive with debug output
-        verbose "Executing: docker save '$image_name' -o '$extract_dir/image.tar'"
-        docker save "$image_name" -o "$extract_dir/image.tar" 2> docker_save_error.log || {
-            error "Docker save failed. Error output:\n$(cat docker_save_error.log)\n" $EXIT_OPERATION_FAILED
-        }
-
-        # Verify output file
-        if [[ ! -f "$extract_dir/image.tar" ]]; then
-            error "Image tarball not created: $extract_dir/image.tar" $EXIT_OPERATION_FAILED
-        else
-            verbose "Image tarball created: $(du -h "$extract_dir/image.tar" | cut -f1)"
+        if [[ -n "$PLATFORM_OS" ]]; then
+            skopeo_cmd="$skopeo_cmd --override-os=$PLATFORM_OS"
         fi
 
-        # Extract tar contents
-        tar -xf "$extract_dir/image.tar" -C "$extract_dir" || error "Failed to extract image tar" $EXIT_OPERATION_FAILED
+        # Copy image to OCI directory format for easier layer access
+        # Use absolute path to avoid Skopeo path issues
+        local absolute_image_file=$(realpath "$image_file")
+        local transport_url="$format://$absolute_image_file"
+        local dest_url="oci://$extract_dir"
+        verbose "Executing: $skopeo_cmd '$transport_url' '$dest_url'"
 
-        # Remove the tar file after extraction
-        rm -f "$extract_dir/image.tar"
+        # Execute Skopeo command directly without eval to avoid quote issues
+        $skopeo_cmd "$transport_url" "$dest_url" || \
+            error "Skopeo copy failed" $EXIT_OPERATION_FAILED
 
-        verbose "Image extracted to: $extract_dir"
+        # Debug: Show what Skopeo created
+        verbose "Skopeo copy completed, directory structure:"
+        ls -la "$extract_dir"
+        find "$extract_dir" -name "*.json" -o -name "*.blob" -o -name "sha256:*" | head -20
+
+        verbose "Image layers extracted to: $extract_dir"
+    fi
+}
+
+# Get image manifest using Skopeo (for local image files)
+get_manifest_skopeo() {
+    local image_file="$1"
+    local format="${2:-}"
+
+    if [[ -z "$format" ]]; then
+        format=$(detect_image_format "$image_file")
+    fi
+
+    verbose "Getting manifest from local image file: $image_file"
+
+    local transport_url=$(get_skopeo_transport "$image_file" "$format")
+
+    # Build Skopeo inspect command with platform options if specified
+    local skopeo_cmd="skopeo inspect --raw"
+
+    if [[ -n "$PLATFORM_ARCH" ]]; then
+        skopeo_cmd="$skopeo_cmd --override-arch=$PLATFORM_ARCH"
+    fi
+
+    if [[ -n "$PLATFORM_OS" ]]; then
+        skopeo_cmd="$skopeo_cmd --override-os=$PLATFORM_OS"
+    fi
+
+    verbose "Executing: $skopeo_cmd '$transport_url'"
+
+    eval "$skopeo_cmd '$transport_url'" || \
+        error "Skopeo inspect failed" $EXIT_OPERATION_FAILED
+}
+
+# Extract Docker image to temporary directory
+extract_image_layers() {
+    local image_source="$1"
+    local extract_dir="$2"
+
+    # Detect if source is a local file or Docker daemon image
+    # Debug: Print image source before detection
+    verbose "Image source before detection: '$image_source'"
+    detect_image_source "$image_source"
+
+    if [[ $USE_SKEPEO -eq 1 ]]; then
+        # Use Skopeo for local image file
+        extract_layers_skopeo "$IMAGE_FILE" "$extract_dir" "$SOURCE_FORMAT"
+    else
+        # Use Docker daemon for loaded image
+        verbose "Extracting Docker image: $image_source"
+
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$extract_dir"
+
+            # Enhanced debug logging
+            verbose "Working directory: $(pwd)"
+            verbose "Docker version: $(docker --version)"
+            verbose "Docker image list:"
+            docker image list | tee docker_images.log
+
+            # Sanitize image name by removing quotes
+            local sanitized_name=$(echo "$image_source" | tr -d '"')
+
+            # Verify image exists first
+            verbose "Checking for image: $sanitized_name"
+            if ! docker image inspect "$sanitized_name" > /dev/null 2>&1; then
+                error "Image '$sanitized_name' not found locally. See docker_images.log for available images." $EXIT_OPERATION_FAILED
+            else
+                verbose "Image found: $sanitized_name"
+                docker image inspect "$sanitized_name" > image_inspect.json
+            fi
+
+            # Use sanitized name for all Docker operations
+            image_source="$sanitized_name"
+
+            # Create the tar archive with debug output
+            verbose "Executing: docker save '$image_source' -o '$extract_dir/image.tar'"
+            docker save "$image_source" -o "$extract_dir/image.tar" 2> docker_save_error.log || {
+                error "Docker save failed. Error output:\n$(cat docker_save_error.log)\n" $EXIT_OPERATION_FAILED
+            }
+
+            # Verify output file
+            if [[ ! -f "$extract_dir/image.tar" ]]; then
+                error "Image tarball not created: $extract_dir/image.tar" $EXIT_OPERATION_FAILED
+            else
+                verbose "Image tarball created: $(du -h "$extract_dir/image.tar" | cut -f1)"
+            fi
+
+            # Extract tar contents
+            # New Docker versions save in OCI format, old in Docker format
+            tar -xf "$extract_dir/image.tar" -C "$extract_dir" || error "Failed to extract image tar" $EXIT_OPERATION_FAILED
+
+            # Check for different formats
+            if [[ ! -f "$extract_dir/manifest.json" ]] && [[ -f "$extract_dir/index.json" ]]; then
+                # This is OCI format - create the expected directories
+                mkdir -p "$extract_dir/blobs/sha256"
+                mv "$extract_dir"/*.json "$extract_dir/blobs/sha256" 2>/dev/null || true
+            fi
+
+            # Remove the tar file after extraction
+            rm -f "$extract_dir/image.tar"
+
+            verbose "Image extracted to: $extract_dir"
+        fi
     fi
 }
 
 # Get image manifest
 get_image_manifest() {
     local extract_dir="$1"
-    local manifest_file="$extract_dir/manifest.json"
+    local manifest_file
 
-    if [[ ! -f "$manifest_file" ]]; then
-        error "manifest.json not found in extracted image" $EXIT_OPERATION_FAILED
+    # Check if it's OCI format directory structure
+    if [[ -f "$extract_dir/index.json" && -d "$extract_dir/blobs" ]]; then
+        # Skopeo copies OCI format to this structure
+        echo "$extract_dir/index.json"
+    # Check if it's Docker format
+    elif [[ -f "$extract_dir/manifest.json" ]]; then
+        echo "$extract_dir/manifest.json"
+    else
+        # Search for manifest file in various locations
+        manifest_file=$(find "$extract_dir" -name "manifest.json" -o -name "index.json" | head -1)
+        if [[ -n "$manifest_file" ]]; then
+            echo "$manifest_file"
+        else
+            error "No manifest found in extracted image at $extract_dir" $EXIT_OPERATION_FAILED
+        fi
     fi
-
-    echo "$manifest_file"
 }
 
 # Get layer list from manifest
 get_layer_list() {
     local manifest_file="$1"
+    local layers_output=""
 
-    # Extract layer digests from manifest.json
-    # The manifest contains layers with their SHA256 digests
-    python3 -c "
-import json
-import sys
+    # Handle case where manifest_file might be empty
+    if [[ -z "$manifest_file" ]]; then
+        error "No manifest file provided" $EXIT_OPERATION_FAILED
+    fi
 
-with open('$manifest_file', 'r') as f:
-    manifest = json.load(f)
+    # First check if we can find layer blobs directly
+    if [[ -f "$manifest_file" ]]; then
+        local manifest_dir="${manifest_file%/*}"
+        if [[ -n "$manifest_dir" ]]; then
+            local blob_dir=$(find "$manifest_dir" -name "blobs" -type d 2>/dev/null | head -1)
+            if [[ -n "$blob_dir" ]]; then
+                layers_output=$(find "$blob_dir" -type f -name "sha256:*" 2>/dev/null | head -10 | awk -F/ '{print $NF}' | sed 's/sha256://' || true)
+            fi
+        fi
 
-# Get layers from the first manifest entry
-if manifest and len(manifest) > 0:
-    layers = manifest[0].get('Layers', [])
-    for layer in layers:
-        print(layer)
-" 2>/dev/null || error "Failed to parse manifest.json" $EXIT_OPERATION_FAILED
+        # If no layers found, try to parse manifest
+        if [[ -z "$layers_output" ]]; then
+            # Get actual manifest file if we have an index
+            if [[ "$manifest_file" == */index.json ]]; then
+                # OCI format index - get the actual manifest
+                local manifest_digest=$(jq -r '.manifests[0].digest' "$manifest_file" 2>/dev/null | cut -d: -f2)
+                local actual_manifest
+                if [[ -n "$manifest_digest" ]]; then
+                    actual_manifest="${manifest_file%/*}/blobs/sha256/${manifest_digest}"
+                    if [[ -f "$actual_manifest" ]]; then
+                        layers_output=$(jq -r '.layers[].digest' "$actual_manifest" 2>/dev/null | sed 's/sha256://' || true)
+                    fi
+                fi
+                # If no layers from manifest, get from index
+                if [[ -z "$layers_output" ]]; then
+                    layers_output=$(jq -r '.manifests[].digest' "$manifest_file" 2>/dev/null | sed 's/sha256://' || true)
+                fi
+            elif [[ "$manifest_file" == */manifest.json ]]; then
+                # Docker format manifest
+                layers_output=$(jq -r '.[0].Layers[]' "$manifest_file" 2>/dev/null || true)
+                if [[ -z "$layers_output" ]]; then
+                    layers_output=$(jq -r '.Layers[]' "$manifest_file" 2>/dev/null || true)
+                fi
+            else
+                # Fallback for unknown manifest format
+                layers_output=$(find "${manifest_file%/*}" -type f -size +1k -o -type f -name "*.blob" | head -10 | awk -F/ '{print $NF}' | sed 's/sha256://' || true)
+            fi
+        fi
+    fi
+
+    if [[ -z "$layers_output" ]]; then
+        error "Failed to extract layer list from manifest or blob directory" $EXIT_OPERATION_FAILED
+    fi
+
+    echo "$layers_output"
 }
 
 # ============================================================================
@@ -297,41 +511,55 @@ create_layer_delta() {
     fi
 }
 
-# Create delta package for Docker image
+# Create delta package between two Docker images (base and target)
 create_delta_package() {
-    local image_name="$1"
-    local delta_package="$2"
+    local base_image="${1:-}"
+    local target_image="$2"
+    local delta_package="$3"
 
-    info "Creating delta package for image: $image_name"
+    if [[ -z "$base_image" ]]; then
+        info "Creating delta package from baseline to image: $target_image"
+        base_image=""
+    else
+        info "Creating delta package from $base_image to $target_image"
+    fi
 
-    # Create temporary directory for extraction
-    local temp_dir
-    temp_dir=$(mktemp -d)
-    trap "rm -rf '$temp_dir'" EXIT
+    # Create temporary directories for extraction
+    local base_temp_dir=$(mktemp -d)
+    local target_temp_dir=$(mktemp -d)
+    trap "rm -rf '$base_temp_dir' '$target_temp_dir'" EXIT
 
-    # Extract image layers with retry logic
-    safe_docker_operation "extract_image_layers \"$image_name\" \"$temp_dir\""
+    # Extract base image if provided
+    local base_layers
+    if [[ -n "$base_image" ]]; then
+        extract_image_layers "$base_image" "$base_temp_dir"
 
-    # Get manifest
-    local manifest_file
-    manifest_file=$(get_image_manifest "$temp_dir")
+        # Get base manifest and layer list
+        local base_manifest_file=$(get_image_manifest "$base_temp_dir")
+        base_layers=$(get_layer_list "$base_manifest_file")
+    fi
 
-    # Get layer list
-    local layers
-    layers=$(get_layer_list "$manifest_file")
+    # Extract target image
+    extract_image_layers "$target_image" "$target_temp_dir"
+
+    # Get target manifest and layer list
+    local target_manifest_file=$(get_image_manifest "$target_temp_dir")
+    local target_layers=$(get_layer_list "$target_manifest_file")
 
     # Create delta package directory
-    local delta_dir
-    delta_dir=$(mktemp -d)
+    local delta_dir=$(mktemp -d)
     trap "rm -rf '$delta_dir'" EXIT
     mkdir -p "$delta_dir/layer_deltas"
 
-    # Copy manifest
-    cp "$manifest_file" "$delta_dir/manifest.json" || error "Failed to copy manifest" $EXIT_OPERATION_FAILED
+    # Copy target manifest and repositories
+    if [[ -f "$target_manifest_file" ]]; then
+        cp "$target_manifest_file" "$delta_dir/manifest.json" || error "Failed to copy manifest" $EXIT_OPERATION_FAILED
+    else
+        error "Manifest file not found at $target_manifest_file" $EXIT_OPERATION_FAILED
+    fi
 
-    # Copy repositories file if exists
-    if [[ -f "$temp_dir/repositories" ]]; then
-        cp "$temp_dir/repositories" "$delta_dir/repositories" || error "Failed to copy repositories" $EXIT_OPERATION_FAILED
+    if [[ -f "$target_temp_dir/repositories" ]]; then
+        cp "$target_temp_dir/repositories" "$delta_dir/repositories" || error "Failed to copy repositories" $EXIT_OPERATION_FAILED
     fi
 
     # Create metadata
@@ -341,36 +569,73 @@ create_delta_package() {
     "delta_method": "$DELTA_METHOD",
     "compression": "$COMPRESSION",
     "compression_level": $COMPRESSION_LEVEL,
-    "image_name": "$image_name",
+    "base_image": "${base_image:-}",
+    "target_image": "$target_image",
     "created_at": "$(date -Iseconds)"
 }
 EOF
 
-    # Process each layer
+    # Process each target layer
     local layer_count=0
-    while IFS= read -r layer; do
-        if [[ -n "$layer" ]]; then
+    while IFS= read -r target_layer; do
+        if [[ -n "$target_layer" ]]; then
             layer_count=$((layer_count + 1))
-            local layer_file="$temp_dir/$layer"
-            local delta_file="$delta_dir/layer_deltas/${layer}.delta"
 
-            info "Processing layer $layer_count: $layer"
+            # Determine layer file path based on format
+            local target_layer_file=""
+            local is_oci_format=0
 
-            if [[ "$DELTA_METHOD" == "layer" ]]; then
-                # Layer method: just copy the layer
-                create_layer_delta "" "$layer_file" "$delta_file"
+            # Check if this is OCI format (has blobs directory)
+            if [[ -d "$target_temp_dir/blobs" ]]; then
+                is_oci_format=1
+                target_layer_file="$target_temp_dir/blobs/sha256/$target_layer"
             else
-                # For xdelta3/bsdiff, we need an old version to create delta
-                # Since we don't have an old version, we'll use an empty file as baseline
-                local empty_file
-                empty_file=$(mktemp)
-                trap "rm -f '$empty_file'" EXIT
+                target_layer_file="$target_temp_dir/$target_layer"
+            fi
 
-                create_layer_delta "$empty_file" "$layer_file" "$delta_file"
-                rm -f "$empty_file"
+            local delta_file="$delta_dir/layer_deltas/${target_layer}.delta"
+
+            info "Processing layer $layer_count: $target_layer"
+
+            # Verify layer file exists
+            if [[ ! -f "$target_layer_file" ]]; then
+                error "Layer file not found: $target_layer_file" $EXIT_OPERATION_FAILED
+            fi
+
+            # Find corresponding base layer if available
+            local base_layer_file=""
+            if [[ -n "$base_image" ]]; then
+                # Try to find layer with same digest in base image
+                for base_layer in $base_layers; do
+                    if [[ "$base_layer" == "$target_layer" ]]; then
+                        if [[ $is_oci_format -eq 1 ]]; then
+                            base_layer_file="$base_temp_dir/blobs/sha256/$base_layer"
+                        else
+                            base_layer_file="$base_temp_dir/$base_layer"
+                        fi
+                        break
+                    fi
+                done
+            fi
+
+            if [[ -z "$base_layer_file" ]]; then
+                if [[ "$DELTA_METHOD" == "layer" ]]; then
+                    # No base layer - copy full layer
+                    create_layer_delta "" "$target_layer_file" "$delta_file"
+                else
+                    # No base layer - use empty file
+                    local empty_file
+                    empty_file=$(mktemp)
+                    trap "rm -f '$empty_file'" EXIT
+                    create_layer_delta "$empty_file" "$target_layer_file" "$delta_file"
+                    rm -f "$empty_file"
+                fi
+            else
+                # Base layer found - create delta
+                create_layer_delta "$base_layer_file" "$target_layer_file" "$delta_file"
             fi
         fi
-    done <<< "$layers"
+    done <<< "$target_layers"
 
     # Create the delta package tar
     info "Creating delta package: $delta_package"
@@ -659,7 +924,10 @@ Docker image delta transfer utility for efficient offline transfers.
 Transfers only changed layers instead of complete images.
 
 Actions:
-  create IMAGE_NAME DELTA_PACKAGE    Create delta package from Docker image
+  create [BASE_IMAGE] TARGET_IMAGE DELTA_PACKAGE    Create delta package
+    Without BASE_IMAGE: Creates delta from baseline to TARGET_IMAGE
+    With BASE_IMAGE: Creates delta between two images (BASE and TARGET)
+
   apply DELTA_PACKAGE [IMAGE_NAME]   Apply delta package to reconstruct image
   list DELTA_PACKAGE                 List layers in delta package
   info DELTA_PACKAGE                 Show delta package metadata
@@ -673,6 +941,9 @@ Options:
   -m, --method METHOD        Delta method: xdelta3 (default), bsdiff, layer
   -c, --compression FORMAT   Compress delta: zstd (default), gzip, bzip2, xz, none
   -l, --level LEVEL          Compression level (1-9, or -1 to -100 for zstd fast mode)
+  -s, --source-format FORMAT Source image format for local files: docker-archive, oci-archive
+  -t, --target-format FORMAT Output format for reconstructed images: docker-archive, oci-archive
+  -p, --platform OS/ARCH     Specify platform for multi-arch images
   -v, --verbose              Show detailed operation info
   -d, --dry-run              Simulate operation without making changes
   -f, --force                Overwrite existing delta/target files
@@ -680,8 +951,11 @@ Options:
   --version                  Show script version
 
 Examples:
-  # Create delta package from Docker image
+  # Create delta from baseline to target image
   $0 create nginx:latest nginx.delta.tar.gz
+
+  # Create delta between two specific images
+  $0 create nginx:1.23 nginx:1.24 nginx-update.delta.tar.gz
 
   # Apply delta package to reconstruct image
   $0 apply nginx.delta.tar.gz
@@ -689,25 +963,22 @@ Examples:
   # List layers in delta package
   $0 list nginx.delta.tar.gz
 
-  # Show delta package info
-  $0 info nginx.delta.tar.gz
+  # Create delta from OCI archive file
+  $0 -s oci-archive create nginx.oci.tar.gz nginx.delta.tar.gz
 
-  # Create delta with bsdiff method
-  $0 -m bsdiff create myapp:v2 myapp.delta.tar.gz
+  # Apply delta to create OCI archive file
+  $0 -t oci-archive apply nginx.delta.tar.gz nginx-updated.oci.tar.gz
 
-  # Create uncompressed delta (layer method only)
-  $0 -m layer -c none create myimage:v1 image.delta.tar
-
-  # Verbose dry run
-  $0 -vd create myimage:v2 test.delta.tar.gz
+  # Specify platform for multi-arch image
+  $0 -p linux/arm64 create myapp:latest myapp-arm64.delta.tar.gz
 
 Dependencies:
   Required: docker, tar, file_delta, python3 (for JSON parsing)
-  Optional: zstd, gzip, bzip2, xz (for compression)
+  Optional: zstd, gzip, bzip2, xz, skopeo (for local file operations)
 
 Notes:
-  - The delta package contains layer deltas and image metadata
-  - For xdelta3/bsdiff methods, an empty file is used as baseline
+  - When working with local image files (not in Docker daemon), Skopeo is required
+  - For local files, supports Docker archive (.tar) and OCI archive (.tar.gz) formats
   - Layer method transfers complete layers without delta encoding
   - Use 'list' action to preview layers before applying
 EOF
@@ -730,7 +1001,8 @@ parse_args() {
         shift
     done
 
-    TEMP=$(getopt -o m:c:l:vdh --long method:,compression:,level:,verbose,dry-run,help,version -n "$0" -- "${args[@]}")
+    # Add new options for Skopeo integration
+    TEMP=$(getopt -o m:c:l:s:t:p:vdh --long method:,compression:,level:,source-format:,target-format:,platform:,verbose,dry-run,help,version -n "$0" -- "${args[@]}")
 
     if [ $? != 0 ] ; then error "Terminating..." $EXIT_ERROR ; exit $EXIT_ERROR ; fi
 
@@ -748,6 +1020,20 @@ parse_args() {
                 ;;
             -l|--level)
                 COMPRESSION_LEVEL="$2"
+                shift 2
+                ;;
+            -s|--source-format)
+                SOURCE_FORMAT="$2"
+                shift 2
+                ;;
+            -t|--target-format)
+                TARGET_FORMAT="$2"
+                shift 2
+                ;;
+            -p|--platform)
+                # Parse platform in format os/arch
+                PLATFORM_OS=${2%%/*}
+                PLATFORM_ARCH=${2#*/}
                 shift 2
                 ;;
             -v|--verbose)
@@ -790,16 +1076,31 @@ parse_args() {
         create)
             if [ $# -lt 2 ]; then
                 error "Missing arguments for create. Use -h for help." $EXIT_INVALID_INPUT
+            elif [ $# -eq 3 ]; then
+                # create base_image target_image delta_package
+                BASE_IMAGE="$1"
+                TARGET_IMAGE="$2"
+                DELTA_PACKAGE="$3"
+            elif [ $# -eq 2 ]; then
+                # create target_image delta_package (no base)
+                BASE_IMAGE=""
+                TARGET_IMAGE="$1"
+                DELTA_PACKAGE="$2"
+            else
+                error "Invalid number of arguments for create. Use either:\n  create TARGET_IMAGE DELTA_PACKAGE\n  create BASE_IMAGE TARGET_IMAGE DELTA_PACKAGE" $EXIT_INVALID_INPUT
             fi
-            IMAGE_NAME="$1"
-            DELTA_PACKAGE="$2"
             ;;
         apply)
             if [ $# -lt 1 ]; then
                 error "Missing arguments for apply. Use -h for help." $EXIT_INVALID_INPUT
             fi
             DELTA_PACKAGE="$1"
-            IMAGE_NAME="${2:-}"
+            # Optional image name for reconstruction
+            if [[ $# -ge 2 ]]; then
+                RECONSTRUCTED_IMAGE="$2"
+            else
+                RECONSTRUCTED_IMAGE=""
+            fi
             ;;
         list|info)
             if [ $# -lt 1 ]; then
@@ -829,10 +1130,10 @@ main() {
 
     case "$ACTION" in
         create)
-            create_delta_package "$IMAGE_NAME" "$DELTA_PACKAGE"
+            create_delta_package "$BASE_IMAGE" "$TARGET_IMAGE" "$DELTA_PACKAGE"
             ;;
         apply)
-            apply_delta_package "$DELTA_PACKAGE" "$IMAGE_NAME"
+            apply_delta_package "$DELTA_PACKAGE" "$RECONSTRUCTED_IMAGE"
             ;;
         list)
             list_delta_package "$DELTA_PACKAGE"
