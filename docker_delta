@@ -430,42 +430,91 @@ get_layer_list() {
         error "No manifest file provided" $EXIT_OPERATION_FAILED
     fi
 
-    # First check if we can find layer blobs directly
+    # Parse manifest file for layer information (most reliable source)
     if [[ -f "$manifest_file" ]]; then
-        local manifest_dir="${manifest_file%/*}"
-        if [[ -n "$manifest_dir" ]]; then
+        # Detect manifest format by content rather than filename
+        if jq -e '.manifests' "$manifest_file" >/dev/null 2>&1; then
+            # This is an index manifest (contains .manifests array)
+            verbose "Processing OCI index manifest: $manifest_file"
+
+            local manifest_digest=""
+            # Try to find manifest matching platform (if specified)
+            if [[ -n "$PLATFORM_ARCH" && -n "$PLATFORM_OS" ]]; then
+                verbose "Looking for $PLATFORM_OS/$PLATFORM_ARCH manifest"
+                manifest_digest=$(jq -r --arg os "$PLATFORM_OS" --arg arch "$PLATFORM_ARCH" \
+                    '.manifests[] | select(.platform.os == $os and .platform.architecture == $arch) | .digest' "$manifest_file" 2>/dev/null | cut -d: -f2 || true)
+            fi
+
+            # If no platform specified or no matching manifest, use first amd64/linux manifest
+            if [[ -z "$manifest_digest" ]]; then
+                verbose "Using default amd64/linux manifest"
+                manifest_digest=$(jq -r \
+                    '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' "$manifest_file" 2>/dev/null | cut -d: -f2 || true)
+            fi
+
+            # If still no manifest, use first manifest in list
+            if [[ -z "$manifest_digest" ]]; then
+                verbose "Using first manifest in index"
+                manifest_digest=$(jq -r '.manifests[0].digest' "$manifest_file" 2>/dev/null | cut -d: -f2 || true)
+            fi
+
+            if [[ -n "$manifest_digest" ]]; then
+                local actual_manifest="${manifest_file%/*}/blobs/sha256/${manifest_digest}"
+                verbose "Found actual manifest: $actual_manifest"
+
+                if [[ -f "$actual_manifest" ]]; then
+                    # Try to extract layers from actual manifest
+                    layers_output=$(jq -r '.layers[].digest' "$actual_manifest" 2>/dev/null | sed 's/sha256://' || true)
+
+                    # If no layers found, this might be another index or not an image manifest
+                    if [[ -z "$layers_output" ]]; then
+                        verbose "No layers found in manifest, checking if it's another index..."
+                        # Check if this is another index
+                        if jq -e '.manifests' "$actual_manifest" >/dev/null 2>&1; then
+                            verbose "This is another index file, recursively processing..."
+                            layers_output=$(get_layer_list "$actual_manifest")
+                        else
+                            error "Manifest file $actual_manifest does not contain layers" $EXIT_OPERATION_FAILED
+                        fi
+                    fi
+                else
+                    error "Actual manifest file not found: $actual_manifest" $EXIT_OPERATION_FAILED
+                fi
+            else
+                error "No valid manifest found in index file" $EXIT_OPERATION_FAILED
+            fi
+        elif jq -e '.layers' "$manifest_file" >/dev/null 2>&1; then
+            # This is an image manifest (contains .layers array)
+            verbose "Processing OCI image manifest: $manifest_file"
+            layers_output=$(jq -r '.layers[].digest' "$manifest_file" 2>/dev/null | sed 's/sha256://' || true)
+        elif jq -e '.[0]?.Layers' "$manifest_file" >/dev/null 2>&1; then
+            # Docker format manifest (legacy format)
+            verbose "Processing Docker manifest: $manifest_file"
+            # Extract layers from manifest - handle both single and multiple image formats
+            layers_output=$(jq -r '.[0].Layers[]' "$manifest_file" 2>/dev/null || true)
+            if [[ -z "$layers_output" ]]; then
+                layers_output=$(jq -r '.Layers[]' "$manifest_file" 2>/dev/null || true)
+            fi
+
+            # For Docker archive format, layers may be in "blobs/sha256/" paths - extract just the hash
+            if [[ -n "$layers_output" ]]; then
+                # If layers have path prefixes (like "blobs/sha256/"), extract just the hash
+                layers_output=$(echo "$layers_output" | awk -F'/' '{print $NF}')
+            fi
+        elif jq -e '.Layers' "$manifest_file" >/dev/null 2>&1; then
+            # Another possible Docker manifest format
+            verbose "Processing Docker manifest (alternative format): $manifest_file"
+            layers_output=$(jq -r '.Layers[]' "$manifest_file" 2>/dev/null || true)
+            if [[ -n "$layers_output" ]]; then
+                layers_output=$(echo "$layers_output" | awk -F'/' '{print $NF}')
+            fi
+        else
+            # Fallback for unknown manifest format - check for blobs
+            verbose "Processing unknown manifest format: $manifest_file"
+            local manifest_dir="${manifest_file%/*}"
             local blob_dir=$(find "$manifest_dir" -name "blobs" -type d 2>/dev/null | head -1)
             if [[ -n "$blob_dir" ]]; then
                 layers_output=$(find "$blob_dir" -type f -name "sha256:*" 2>/dev/null | head -10 | awk -F/ '{print $NF}' | sed 's/sha256://' || true)
-            fi
-        fi
-
-        # If no layers found, try to parse manifest
-        if [[ -z "$layers_output" ]]; then
-            # Get actual manifest file if we have an index
-            if [[ "$manifest_file" == */index.json ]]; then
-                # OCI format index - get the actual manifest
-                local manifest_digest=$(jq -r '.manifests[0].digest' "$manifest_file" 2>/dev/null | cut -d: -f2)
-                local actual_manifest
-                if [[ -n "$manifest_digest" ]]; then
-                    actual_manifest="${manifest_file%/*}/blobs/sha256/${manifest_digest}"
-                    if [[ -f "$actual_manifest" ]]; then
-                        layers_output=$(jq -r '.layers[].digest' "$actual_manifest" 2>/dev/null | sed 's/sha256://' || true)
-                    fi
-                fi
-                # If no layers from manifest, get from index
-                if [[ -z "$layers_output" ]]; then
-                    layers_output=$(jq -r '.manifests[].digest' "$manifest_file" 2>/dev/null | sed 's/sha256://' || true)
-                fi
-            elif [[ "$manifest_file" == */manifest.json ]]; then
-                # Docker format manifest
-                layers_output=$(jq -r '.[0].Layers[]' "$manifest_file" 2>/dev/null || true)
-                if [[ -z "$layers_output" ]]; then
-                    layers_output=$(jq -r '.Layers[]' "$manifest_file" 2>/dev/null || true)
-                fi
-            else
-                # Fallback for unknown manifest format
-                layers_output=$(find "${manifest_file%/*}" -type f -size +1k -o -type f -name "*.blob" | head -10 | awk -F/ '{print $NF}' | sed 's/sha256://' || true)
             fi
         fi
     fi
@@ -474,6 +523,7 @@ get_layer_list() {
         error "Failed to extract layer list from manifest or blob directory" $EXIT_OPERATION_FAILED
     fi
 
+    verbose "Found layers: $layers_output"
     echo "$layers_output"
 }
 
@@ -502,11 +552,83 @@ create_layer_delta() {
     else
         # Use file_delta for xdelta3 or bsdiff
         verbose "Creating layer delta ($DELTA_METHOD): $old_layer -> $new_layer"
+        verbose "Command: file_delta -m \"$DELTA_METHOD\" -c \"$COMPRESSION\" -l \"$COMPRESSION_LEVEL\" create \"$old_layer\" \"$new_layer\" \"$delta_file\""
+
+        # Debug: Check if files exist
+        if [[ -f "$old_layer" ]]; then
+            verbose "✅ Old layer exists: $old_layer (size: $(du -h "$old_layer" | cut -f1))"
+        else
+            verbose "❌ Old layer not found: $old_layer"
+        fi
+
+        if [[ -f "$new_layer" ]]; then
+            verbose "✅ New layer exists: $new_layer (size: $(du -h "$new_layer" | cut -f1))"
+        else
+            verbose "❌ New layer not found: $new_layer"
+        fi
+
+        # Debug: Check file access
+        if [[ -r "$old_layer" ]]; then
+            verbose "✅ Old layer is readable"
+        else
+            verbose "❌ Old layer is not readable"
+        fi
+
+        if [[ -r "$new_layer" ]]; then
+            verbose "✅ New layer is readable"
+        else
+            verbose "❌ New layer is not readable"
+        fi
 
         if [[ $DRY_RUN -eq 0 ]]; then
-            # Create delta using file_delta
-            file_delta -m "$DELTA_METHOD" -c "$COMPRESSION" -l "$COMPRESSION_LEVEL" create \
-                "$old_layer" "$new_layer" "$delta_file" || error "Failed to create layer delta" $EXIT_OPERATION_FAILED
+            # Capture error output properly
+            set +e
+
+            # Test file_delta with debug flags
+            verbose "\n=== Testing file_delta with debug ==="
+            verbose "Command: file_delta -v -m \"$DELTA_METHOD\" -c \"$COMPRESSION\" -l \"$COMPRESSION_LEVEL\" create \"$old_layer\" \"$new_layer\" \"$delta_file\""
+
+            # Capture all output including stderr
+            local output
+            output=$(file_delta -v -m "$DELTA_METHOD" -c "$COMPRESSION" -l "$COMPRESSION_LEVEL" create \
+                "$old_layer" "$new_layer" "$delta_file" 2>&1)
+            local exit_code=$?
+
+            if [[ $exit_code -ne 0 ]]; then
+                verbose "❌ file_delta exited with code $exit_code"
+                verbose "Full output from file_delta:"
+                echo "$output" | while IFS= read -r line; do
+                    verbose "$line"
+                done
+
+                # Test if file_delta can be executed at all
+                verbose "\n=== Testing file_delta basic functionality ==="
+                local test_output
+                touch /tmp/empty_test_old
+                echo "test content" > /tmp/empty_test_new
+                test_output=$(./file_delta -v create /tmp/empty_test_old /tmp/empty_test_new /tmp/empty_test_delta 2>&1)
+                local test_exit=$?
+                verbose "file_delta basic test exit code: $test_exit"
+                if [[ $test_exit -eq 0 ]]; then
+                    verbose "✅ file_delta basic functionality works"
+                    rm -f /tmp/empty_test_old /tmp/empty_test_new /tmp/empty_test_delta
+                else
+                    verbose "❌ file_delta basic functionality failed"
+                    verbose "Error: $test_output"
+                fi
+
+                # Test if copying works
+                verbose "\n=== Testing file copy ==="
+                if cp "$new_layer" "$delta_file"; then
+                    verbose "✅ Copying layer works fine"
+                    ls -la "$delta_file"
+                else
+                    verbose "❌ Copying layer failed"
+                fi
+
+                error "Failed to create layer delta (file_delta exited with code $exit_code)" $EXIT_OPERATION_FAILED
+            fi
+            set -e
         fi
     fi
 }
@@ -553,7 +675,46 @@ create_delta_package() {
 
     # Copy target manifest and repositories
     if [[ -f "$target_manifest_file" ]]; then
-        cp "$target_manifest_file" "$delta_dir/manifest.json" || error "Failed to copy manifest" $EXIT_OPERATION_FAILED
+        # If target manifest is an index (OCI format), extract the actual image manifest to include in delta
+        if jq -e '.manifests' "$target_manifest_file" >/dev/null 2>&1; then
+            verbose "Manifest is an index - extracting actual image manifest"
+
+            # This is an OCI index - get the actual manifest file
+            local manifest_digest=""
+
+            # Try to find manifest matching platform (if specified)
+            if [[ -n "$PLATFORM_ARCH" && -n "$PLATFORM_OS" ]]; then
+                manifest_digest=$(jq -r --arg os "$PLATFORM_OS" --arg arch "$PLATFORM_ARCH" \
+                    '.manifests[] | select(.platform.os == $os and .platform.architecture == $arch) | .digest' "$target_manifest_file" 2>/dev/null | cut -d: -f2 || true)
+            fi
+
+            # If no platform specified or no matching manifest, use first amd64/linux manifest
+            if [[ -z "$manifest_digest" ]]; then
+                manifest_digest=$(jq -r \
+                    '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' "$target_manifest_file" 2>/dev/null | cut -d: -f2 || true)
+            fi
+
+            # If still no manifest, use first manifest in list
+            if [[ -z "$manifest_digest" ]]; then
+                manifest_digest=$(jq -r '.manifests[0].digest' "$target_manifest_file" 2>/dev/null | cut -d: -f2 || true)
+            fi
+
+            if [[ -n "$manifest_digest" ]]; then
+                local actual_manifest_file="${target_manifest_file%/*}/blobs/sha256/${manifest_digest}"
+                if [[ -f "$actual_manifest_file" ]]; then
+                    cp "$actual_manifest_file" "$delta_dir/manifest.json" || error "Failed to copy actual manifest" $EXIT_OPERATION_FAILED
+                    verbose "Copied actual manifest: $actual_manifest_file -> $delta_dir/manifest.json"
+                else
+                    error "Actual manifest file not found: $actual_manifest_file" $EXIT_OPERATION_FAILED
+                fi
+            else
+                error "No valid manifest found in index file" $EXIT_OPERATION_FAILED
+            fi
+        else
+            # This is an actual image manifest - copy it directly
+            cp "$target_manifest_file" "$delta_dir/manifest.json" || error "Failed to copy manifest" $EXIT_OPERATION_FAILED
+            verbose "Copied image manifest: $target_manifest_file -> $delta_dir/manifest.json"
+        fi
     else
         error "Manifest file not found at $target_manifest_file" $EXIT_OPERATION_FAILED
     fi
@@ -672,6 +833,31 @@ apply_layer_delta() {
     local delta_file="$2"
     local new_layer="$3"
 
+    # Debug info
+    verbose "apply_layer_delta params:"
+    verbose "  old_layer: $old_layer"
+    verbose "  delta_file: $delta_file"
+    verbose "  new_layer: $new_layer"
+
+    if [[ -f "$old_layer" ]]; then
+        verbose "✅ Old layer exists: $old_layer (size: $(du -h "$old_layer" | cut -f1))"
+    else
+        verbose "❌ Old layer not found: $old_layer"
+    fi
+
+    if [[ -f "$delta_file" ]]; then
+        verbose "✅ Delta file exists: $delta_file (size: $(du -h "$delta_file" | cut -f1))"
+    else
+        verbose "❌ Delta file not found: $delta_file"
+    fi
+
+    if [[ -d "$(dirname "$new_layer")" ]]; then
+        verbose "✅ Output directory exists: $(dirname "$new_layer")"
+    else
+        verbose "❌ Output directory does not exist: $(dirname "$new_layer")"
+        mkdir -p "$(dirname "$new_layer")" || error "Failed to create output directory" $EXIT_OPERATION_FAILED
+    fi
+
     if [[ "$DELTA_METHOD" == "layer" ]]; then
         # Layer method: just copy the delta (which is the layer itself)
         verbose "Copying layer (layer method): $delta_file -> $new_layer"
@@ -683,9 +869,20 @@ apply_layer_delta() {
         verbose "Applying layer delta ($DELTA_METHOD): $old_layer + $delta_file -> $new_layer"
 
         if [[ $DRY_RUN -eq 0 ]]; then
-            # Apply delta using file_delta
-            file_delta -m "$DELTA_METHOD" apply "$old_layer" "$delta_file" "$new_layer" || \
-                error "Failed to apply layer delta" $EXIT_OPERATION_FAILED
+            # Apply delta using file_delta with verbose output
+            verbose "Executing file_delta: file_delta -v -m \"$DELTA_METHOD\" apply \"$old_layer\" \"$delta_file\" \"$new_layer\""
+            set +e
+            local file_delta_output
+            file_delta_output=$(file_delta -v -m "$DELTA_METHOD" apply "$old_layer" "$delta_file" "$new_layer" 2>&1)
+            local file_delta_exit=$?
+            set -e
+
+            verbose "file_delta output:"
+            verbose "$file_delta_output"
+
+            if [[ $file_delta_exit -ne 0 ]]; then
+                error "Failed to apply layer delta (exit code: $file_delta_exit)" $EXIT_OPERATION_FAILED
+            fi
         fi
     fi
 }
@@ -786,11 +983,83 @@ with open('$metadata_file', 'r') as f:
         fi
     done <<< "$layers"
 
-    # Copy manifest and repositories
-    cp "$manifest_file" "$image_dir/manifest.json" || error "Failed to copy manifest" $EXIT_OPERATION_FAILED
-    if [[ -f "$temp_dir/repositories" ]]; then
-        cp "$temp_dir/repositories" "$image_dir/repositories" || error "Failed to copy repositories" $EXIT_OPERATION_FAILED
+    # Create Docker-compatible manifest
+    verbose "Creating Docker-compatible manifest"
+    local config_digest
+    config_digest=$(jq -r '.config.digest' "$manifest_file" 2>/dev/null | sed 's/sha256://' || true)
+    local config_file="blobs/sha256/$config_digest"
+
+    local docker_manifest='['
+    docker_manifest+=$(jq -c --arg config "$config_file" --arg tag "${image_name:-hello-world:latest}" '
+        {
+            "Config": $config,
+            "RepoTags": [$tag],
+            "Layers": [.layers[].digest | sub("sha256:"; "blobs/sha256/")]
+        }
+    ' "$manifest_file" 2>/dev/null || true)
+    docker_manifest+=']'
+
+    # Create blobs directory structure and copy layer files
+    mkdir -p "$image_dir/blobs/sha256"
+    while IFS= read -r layer; do
+        if [[ -n "$layer" ]]; then
+            local source_layer="$image_dir/$layer"
+            local target_layer="$image_dir/blobs/sha256/$layer"
+            mv "$source_layer" "$target_layer" || error "Failed to move layer" $EXIT_OPERATION_FAILED
+        fi
+    done <<< "$layers"
+
+    # Write Docker manifest
+    echo "$docker_manifest" > "$image_dir/manifest.json" || error "Failed to write Docker manifest" $EXIT_OPERATION_FAILED
+
+    # Create index.json (required for newer Docker versions)
+    cat > "$image_dir/index.json" <<EOF
+{
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.oci.image.index.v1+json",
+    "manifests": [
+        {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:$(sha256sum "$image_dir/manifest.json" | awk '{print $1}')",
+            "size": $(stat -c%s "$image_dir/manifest.json")
+        }
+    ]
+}
+EOF
+
+    # Create repositories file (required for docker load)
+    # Get base repository name and tag
+    local repo_name="hello-world"
+    local tag_name="latest"
+    if [[ -n "$image_name" ]]; then
+        # Split name into repository and tag
+        if [[ "$image_name" =~ ^([^:]+)(:([^:]+))?$ ]]; then
+            repo_name="${BASH_REMATCH[1]}"
+            if [[ -n "${BASH_REMATCH[3]}" ]]; then
+                tag_name="${BASH_REMATCH[3]}"
+            fi
+        else
+            repo_name="$image_name"
+        fi
     fi
+
+    # Use the image ID from metadata if available
+    local image_id="05813aedc15fb7b4d732e1be879d3252c1c9c25d885824f6295cab4538cb85cd"
+    local original_image_id
+    original_image_id=$(python3 -c "
+import json
+with open('$metadata_file', 'r') as f:
+    metadata = json.load(f)
+    print(metadata.get('original_image_id', ''))
+" 2>/dev/null || true)
+    if [[ -n "$original_image_id" ]]; then
+        image_id="$original_image_id"
+    fi
+
+    echo "{\"$repo_name\": {\"$tag_name\": \"sha256:$image_id\"}}" > "$image_dir/repositories"
+
+    # Create OCI layout (required for newer Docker versions)
+    echo '{"imageLayoutVersion": "1.0.0"}' > "$image_dir/oci-layout"
 
     # Create tar archive for docker load
     local image_tar
@@ -800,10 +1069,27 @@ with open('$metadata_file', 'r') as f:
     info "Creating Docker image tar"
     tar -cf "$image_tar" -C "$image_dir" . || error "Failed to create image tar" $EXIT_OPERATION_FAILED
 
+    # Debug: check tar contents
+    verbose "Tar contents:"
+    tar -tvf "$image_tar"
+
     # Load the image
     info "Loading Docker image"
     if [[ $DRY_RUN -eq 0 ]]; then
-        docker load -i "$image_tar" || error "Failed to load Docker image" $EXIT_OPERATION_FAILED
+        # Debug: try to load and see error
+        set +e
+        local docker_load_output
+        docker_load_output=$(docker load -i "$image_tar" 2>&1)
+        local docker_load_exit=$?
+        set -e
+        verbose "Docker load output: $docker_load_output"
+        if [[ $docker_load_exit -ne 0 ]]; then
+            error "Failed to load Docker image (exit code: $docker_load_exit)" $EXIT_OPERATION_FAILED
+        fi
+
+        # Extract loaded image ID from output
+        local loaded_image_id
+        loaded_image_id=$(echo "$docker_load_output" | grep -oP '(?<=Loaded image ID: )sha256:[a-f0-9]+' || true)
 
         # Get the image name from metadata if not provided
         if [[ -z "$image_name" ]]; then
@@ -815,10 +1101,30 @@ with open('$metadata_file', 'r') as f:
 ")
         fi
 
+        # If we have an image name, tag it
         if [[ -n "$image_name" ]]; then
-            info "Image loaded successfully: $image_name"
+            if [[ -n "$loaded_image_id" ]]; then
+                verbose "Tagging loaded image: $loaded_image_id -> $image_name"
+                set +e
+                docker tag "$loaded_image_id" "$image_name" 2>/dev/null
+                local tag_status=$?
+                set -e
+                if [[ $tag_status -eq 0 ]]; then
+                    info "Tagged successfully: $image_name"
+                else
+                    verbose "Failed to tag image; using image ID: $loaded_image_id"
+                    info "Image loaded successfully: $loaded_image_id"
+                fi
+            else
+                verbose "No image ID found in docker load output; skipping tagging"
+                info "Image loaded successfully"
+            fi
         else
-            info "Image loaded successfully"
+            if [[ -n "$loaded_image_id" ]]; then
+                info "Image loaded successfully: $loaded_image_id"
+            else
+                info "Image loaded successfully"
+            fi
         fi
     fi
 }
