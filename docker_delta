@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
+
+# Special handling for dry run mode
+if [[ "$*" == *-d* || "$*" == *--dry-run* ]]; then
+    # In dry run mode, don't exit on errors
+    DRY_RUN=1
+else
+    set -e
+fi
 
 # Docker image delta transfer utility
 # Efficiently transfer Docker images by delta encoding layers
@@ -76,7 +84,10 @@ info() {
 
 # Verbose logging
 verbose() {
-    [[ $VERBOSE -eq 1 ]] && echo -e "${BLUE}[VERBOSE $(date +'%Y-%m-%d %H:%M:%S')]${NC} $*" >&2
+    if [[ $VERBOSE -eq 1 ]]; then
+        echo -e "${BLUE}[VERBOSE $(date +'%Y-%m-%d %H:%M:%S')]${NC} $*" >&2
+    fi
+    return 0
 }
 
 # ============================================================================
@@ -356,30 +367,28 @@ extract_image_layers() {
         # Use Docker daemon for loaded image
         verbose "Extracting Docker image: $image_source"
 
+        # Enhanced debug logging
+        verbose "Working directory: $(pwd)"
+        verbose "Docker version: $(docker --version)"
+        verbose "Docker image list:"
+        docker image list | tee docker_images.log
+
+        # Sanitize image name by removing quotes
+        local sanitized_name=$(echo "$image_source" | tr -d '"')
+
+        # Verify image exists first
+        verbose "Checking for image: $sanitized_name"
+        if ! docker image inspect "$sanitized_name" > /dev/null 2>&1; then
+            error "Image '$sanitized_name' not found locally. See docker_images.log for available images." $EXIT_OPERATION_FAILED
+        else
+            verbose "Image found: $sanitized_name"
+        fi
+
+        # Use sanitized name for all Docker operations
+        image_source="$sanitized_name"
+
         if [[ $DRY_RUN -eq 0 ]]; then
             mkdir -p "$extract_dir"
-
-            # Enhanced debug logging
-            verbose "Working directory: $(pwd)"
-            verbose "Docker version: $(docker --version)"
-            verbose "Docker image list:"
-            docker image list | tee docker_images.log
-
-            # Sanitize image name by removing quotes
-            local sanitized_name=$(echo "$image_source" | tr -d '"')
-
-            # Verify image exists first
-            verbose "Checking for image: $sanitized_name"
-            if ! docker image inspect "$sanitized_name" > /dev/null 2>&1; then
-                error "Image '$sanitized_name' not found locally. See docker_images.log for available images." $EXIT_OPERATION_FAILED
-            else
-                verbose "Image found: $sanitized_name"
-                docker image inspect "$sanitized_name" > image_inspect.json
-            fi
-
-            # Use sanitized name for all Docker operations
-            image_source="$sanitized_name"
-
             # Create the tar archive with debug output
             verbose "Executing: docker save '$image_source' -o '$extract_dir/image.tar'"
             docker save "$image_source" -o "$extract_dir/image.tar" 2> docker_save_error.log || {
@@ -397,17 +406,68 @@ extract_image_layers() {
             # New Docker versions save in OCI format, old in Docker format
             tar -xf "$extract_dir/image.tar" -C "$extract_dir" || error "Failed to extract image tar" $EXIT_OPERATION_FAILED
 
-            # Check for different formats
-            if [[ ! -f "$extract_dir/manifest.json" ]] && [[ -f "$extract_dir/index.json" ]]; then
-                # This is OCI format - create the expected directories
-                mkdir -p "$extract_dir/blobs/sha256"
-                mv "$extract_dir"/*.json "$extract_dir/blobs/sha256" 2>/dev/null || true
-            fi
-
             # Remove the tar file after extraction
             rm -f "$extract_dir/image.tar"
 
             verbose "Image extracted to: $extract_dir"
+        else
+            # In dry run mode, just create empty manifest files structure to satisfy get_image_manifest
+            verbose "Dry run mode - creating manifest structure"
+            # Create OCI format structure in dry run mode
+            mkdir -p "$extract_dir/blobs/sha256"
+
+            # Create simple test manifests
+            verbose "Creating dry run manifest structure"
+            local test_image_digest="deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+            local test_config_digest="cafebabe1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+            local test_layer_digest="feedcafe1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+
+            # Create index.json
+            cat > "$extract_dir/index.json" <<EOF
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:$test_image_digest",
+      "size": 500,
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    }
+  ]
+}
+EOF
+
+            # Create image manifest
+            cat > "$extract_dir/blobs/sha256/$test_image_digest" <<EOF
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "digest": "sha256:$test_config_digest",
+    "size": 200
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:$test_layer_digest",
+      "size": 1000
+    }
+  ]
+}
+EOF
+
+            # Create empty config and layer files
+            touch "$extract_dir/blobs/sha256/$test_config_digest"
+            touch "$extract_dir/blobs/sha256/$test_layer_digest"
+
+            verbose "Dry run manifest structure created successfully"
+
+            verbose "Dry run manifest structure created in $extract_dir"
         fi
     fi
 }
@@ -558,11 +618,15 @@ create_layer_delta() {
     local new_layer="$2"
     local delta_file="$3"
 
+    if [[ $DRY_RUN -eq 1 ]]; then
+        # In dry run mode, just simulate the process
+        verbose "Dry run: Would create delta from $old_layer to $new_layer at $delta_file"
+        return 0
+    fi
+
     # Create directory for delta file if it doesn't exist
     local delta_dir=$(dirname "$delta_file")
-    if [[ $DRY_RUN -eq 0 ]]; then
-        mkdir -p "$delta_dir" || error "Failed to create delta directory: $delta_dir" $EXIT_OPERATION_FAILED
-    fi
+    mkdir -p "$delta_dir" || error "Failed to create delta directory: $delta_dir" $EXIT_OPERATION_FAILED
 
     if [[ "$DELTA_METHOD" == "layer" ]]; then
         # Layer method: just copy the layer (no delta)
@@ -670,7 +734,6 @@ create_delta_package() {
     # Create temporary directories for extraction
     local base_temp_dir=$(mktemp -d)
     local target_temp_dir=$(mktemp -d)
-    trap "rm -rf '$base_temp_dir' '$target_temp_dir'" EXIT
 
     # Extract base image if provided
     local base_layers
@@ -697,14 +760,18 @@ create_delta_package() {
 
     # Create delta package directory
     local delta_dir=$(mktemp -d)
-    trap "rm -rf '$delta_dir'" EXIT
-    mkdir -p "$delta_dir/layer_deltas"
+    # Trap to clean up temporary directories on exit
+    trap 'local exit_code=$?; rm -rf "$base_temp_dir" "$target_temp_dir" "$delta_dir" 2>/dev/null; exit $exit_code' EXIT
+    if [[ $DRY_RUN -eq 0 ]]; then
+        mkdir -p "$delta_dir/layer_deltas"
+    fi
 
     # Copy target manifest and repositories
     if [[ -f "$target_manifest_file" ]]; then
         # If target manifest is an index (OCI format), extract the actual image manifest to include in delta
-        if jq -e '.manifests' "$target_manifest_file" >/dev/null 2>&1; then
-            verbose "Manifest is an index - extracting actual image manifest"
+        local actual_manifest_file="$target_manifest_file"
+        while jq -e '.manifests' "$actual_manifest_file" >/dev/null 2>&1; do
+            verbose "Manifest is an index - resolving to actual image manifest: $actual_manifest_file"
 
             # This is an OCI index - get the actual manifest file
             local manifest_digest=""
@@ -712,36 +779,39 @@ create_delta_package() {
             # Try to find manifest matching platform (if specified)
             if [[ -n "$PLATFORM_ARCH" && -n "$PLATFORM_OS" ]]; then
                 manifest_digest=$(jq -r --arg os "$PLATFORM_OS" --arg arch "$PLATFORM_ARCH" \
-                    '.manifests[] | select(.platform.os == $os and .platform.architecture == $arch) | .digest' "$target_manifest_file" 2>/dev/null | cut -d: -f2 || true)
+                    '.manifests[] | select(.platform.os == $os and .platform.architecture == $arch) | .digest' "$actual_manifest_file" 2>/dev/null | cut -d: -f2 || true)
             fi
 
             # If no platform specified or no matching manifest, use first amd64/linux manifest
             if [[ -z "$manifest_digest" ]]; then
                 manifest_digest=$(jq -r \
-                    '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' "$target_manifest_file" 2>/dev/null | cut -d: -f2 || true)
+                    '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' "$actual_manifest_file" 2>/dev/null | cut -d: -f2 || true)
             fi
 
             # If still no manifest, use first manifest in list
             if [[ -z "$manifest_digest" ]]; then
-                manifest_digest=$(jq -r '.manifests[0].digest' "$target_manifest_file" 2>/dev/null | cut -d: -f2 || true)
+                manifest_digest=$(jq -r '.manifests[0].digest' "$actual_manifest_file" 2>/dev/null | cut -d: -f2 || true)
             fi
 
             if [[ -n "$manifest_digest" ]]; then
-                local actual_manifest_file="${target_manifest_file%/*}/blobs/sha256/${manifest_digest}"
-                if [[ -f "$actual_manifest_file" ]]; then
-                    cp "$actual_manifest_file" "$delta_dir/manifest.json" || error "Failed to copy actual manifest" $EXIT_OPERATION_FAILED
-                    verbose "Copied actual manifest: $actual_manifest_file -> $delta_dir/manifest.json"
+                # Check if manifest file is in blobs directory
+                if [[ "$actual_manifest_file" == */blobs/sha256/* ]]; then
+                    actual_manifest_file="${actual_manifest_file%/*}/${manifest_digest}"
                 else
+                    actual_manifest_file="${actual_manifest_file%/*}/blobs/sha256/${manifest_digest}"
+                fi
+
+                if [[ ! -f "$actual_manifest_file" ]]; then
                     error "Actual manifest file not found: $actual_manifest_file" $EXIT_OPERATION_FAILED
                 fi
             else
                 error "No valid manifest found in index file" $EXIT_OPERATION_FAILED
             fi
-        else
-            # This is an actual image manifest - copy it directly
-            cp "$target_manifest_file" "$delta_dir/manifest.json" || error "Failed to copy manifest" $EXIT_OPERATION_FAILED
-            verbose "Copied image manifest: $target_manifest_file -> $delta_dir/manifest.json"
-        fi
+        done
+
+        # Now copy the actual image manifest (which has layers, not manifests)
+        cp "$actual_manifest_file" "$delta_dir/manifest.json" || error "Failed to copy actual manifest" $EXIT_OPERATION_FAILED
+        verbose "Copied actual manifest: $actual_manifest_file -> $delta_dir/manifest.json"
     else
         error "Manifest file not found at $target_manifest_file" $EXIT_OPERATION_FAILED
     fi
@@ -941,6 +1011,50 @@ apply_delta_package() {
         error "metadata.json not found in delta package" $EXIT_OPERATION_FAILED
     fi
 
+    # Function to get final manifest path
+    get_final_manifest() {
+        local manifest_path="$1"
+        while jq -e '.manifests' "$manifest_path" >/dev/null 2>&1; do
+            verbose "Resolving index manifest"
+            # Extract first manifest in index
+            local manifest_digest=$(jq -r '.manifests[0].digest' "$manifest_path" 2>/dev/null | cut -d: -f2)
+            local manifest_dir="${manifest_path%/*}"
+
+            # Check all possible locations for the manifest blob
+            if [[ -f "$manifest_dir/$manifest_digest" ]]; then
+                manifest_path="$manifest_dir/$manifest_digest"
+            elif [[ -f "$manifest_dir/blobs/sha256/$manifest_digest" ]]; then
+                manifest_path="$manifest_dir/blobs/sha256/$manifest_digest"
+            elif [[ -f "$temp_dir/$manifest_digest" ]]; then
+                manifest_path="$temp_dir/$manifest_digest"
+            else
+                # As a last resort, try reconstructing the path
+                local new_path="$manifest_dir/blobs/sha256/$manifest_digest"
+                if [[ -f "$new_path" ]]; then
+                    manifest_path="$new_path"
+                else
+                    verbose "Possible locations:"
+                    verbose "- $manifest_dir/$manifest_digest"
+                    verbose "- $manifest_dir/blobs/sha256/$manifest_digest"
+                    verbose "- $temp_dir/$manifest_digest"
+                    verbose "- $new_path"
+
+                    # Search the entire temp directory
+                    verbose "Searching for manifest: $manifest_digest"
+                    local found_path=$(find "$temp_dir" -name "$manifest_digest" -print -quit 2>/dev/null)
+                    if [[ -n "$found_path" ]]; then
+                        verbose "Found manifest at: $found_path"
+                        manifest_path="$found_path"
+                    else
+                        error "Manifest blob '$manifest_digest' not found in delta package" $EXIT_OPERATION_FAILED
+                    fi
+                fi
+            fi
+            verbose "Resolved manifest to: $manifest_path"
+        done
+        echo "$manifest_path"
+    }
+
     # Extract delta method from metadata
     local package_delta_method
     package_delta_method=$(python3 -c "
@@ -969,11 +1083,15 @@ with open('$metadata_file', 'r') as f:
     verbose "Delta method: $package_delta_method"
     verbose "Compression: $package_compression level $package_compression_level"
 
-    # Get manifest
+    # Get and resolve manifest
     local manifest_file="$temp_dir/manifest.json"
     if [[ ! -f "$manifest_file" ]]; then
         error "manifest.json not found in delta package" $EXIT_OPERATION_FAILED
     fi
+
+    # Handle nested manifests
+    manifest_file=$(get_final_manifest "$manifest_file")
+    verbose "Using final manifest: $manifest_file"
 
     # Get layer list from manifest
     local layers
@@ -1459,6 +1577,18 @@ main() {
     validate_inputs
     setup_environment
 
+    # Early exit for dry run mode
+    if [[ $DRY_RUN -eq 1 ]]; then
+        info "Dry run mode enabled"
+        info "Would perform action: $ACTION"
+        if [[ $ACTION == "create" ]]; then
+            info "Would create delta package from ${BASE_IMAGE:-baseline} to $TARGET_IMAGE"
+        elif [[ $ACTION == "apply" ]]; then
+            info "Would apply delta package: $DELTA_PACKAGE"
+        fi
+        exit 0
+    fi
+
     verbose "docker_delta version $VERSION"
     verbose "Action: $ACTION"
     verbose "Delta Method: $DELTA_METHOD"
@@ -1484,8 +1614,10 @@ main() {
 
     if [[ $DRY_RUN -eq 1 ]]; then
         verbose "Dry run completed successfully"
+        exit 0
     else
         verbose "Operation completed successfully"
+        exit 0
     fi
 }
 
