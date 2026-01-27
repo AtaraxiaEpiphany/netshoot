@@ -20,7 +20,7 @@ COMPRESSION="zstd"  # Compress delta files: zstd, gzip, bzip2, xz, none
 COMPRESSION_LEVEL=9
 
 # Skopeo integration settings
-USE_SKEPEO=0              # Flag for using Skopeo (0 = Docker daemon, 1 = local file)
+USE_SKOPEO=0              # Flag for using Skopeo (0 = Docker daemon, 1 = local file)
 IMAGE_FILE=""              # Path to local image file
 SOURCE_FORMAT=""           # Source format: docker-archive, oci-archive
 TARGET_FORMAT=""           # Target format: docker-archive, oci-archive
@@ -58,7 +58,14 @@ NC='\033[0m'       # No Color
 # Error logging
 error() {
     local exit_code=${2:-$EXIT_ERROR}
-    echo -e "${RED}[ERROR]${NC} $1" >&2
+    local error_msg="${RED}[ERROR]${NC} $(date +'%Y-%m-%d %H:%M:%S') $1"
+    echo -e "$error_msg" >&2
+
+    # Log to error log file if available
+    if [[ -w "/var/log" ]]; then
+        echo "$error_msg" >> "/var/log/docker_delta_errors.log" 2>/dev/null
+    fi
+
     exit $exit_code
 }
 
@@ -69,7 +76,7 @@ info() {
 
 # Verbose logging
 verbose() {
-    [[ $VERBOSE -eq 1 ]] && echo -e "${BLUE}[VERBOSE]${NC} $*" >&2
+    [[ $VERBOSE -eq 1 ]] && echo -e "${BLUE}[VERBOSE $(date +'%Y-%m-%d %H:%M:%S')]${NC} $*" >&2
 }
 
 # ============================================================================
@@ -94,11 +101,11 @@ detect_image_source() {
     # Debug: Show what we're checking
     verbose "Checking if '$cleaned_source' exists as a file..."
     if [[ -f "$cleaned_source" ]]; then
-        USE_SKEPEO=1
+        USE_SKOPEO=1
         IMAGE_FILE="$cleaned_source"
         verbose "Detected local image file: $cleaned_source"
     else
-        USE_SKEPEO=0
+        USE_SKOPEO=0
         verbose "Detected Docker daemon image: $source"
     fi
 }
@@ -158,7 +165,7 @@ setup_environment() {
     local missing_tools=()
 
     # Check required tools for Docker daemon operations
-    if [[ $USE_SKEPEO -eq 0 ]]; then
+    if [[ $USE_SKOPEO -eq 0 ]]; then
         if ! command_exists "docker"; then
             missing_tools+=("docker")
         fi
@@ -183,7 +190,7 @@ setup_environment() {
     fi
 
     # Check Skopeo for local file operations
-    if [[ $USE_SKEPEO -eq 1 ]]; then
+    if [[ $USE_SKOPEO -eq 1 ]]; then
         if ! command_exists "skopeo"; then
             error "Skopeo is required for local image file operations" $EXIT_MISSING_DEPS
         fi
@@ -245,6 +252,14 @@ validate_inputs() {
 # ============================================================================
 
 # Extract image layers using Skopeo (for local image files)
+# Arguments:
+#   $1 - Path to local image file
+#   $2 - Directory to extract layers to
+#   $3 - Optional: image format (docker-archive, oci-archive)
+# Returns:
+#   None, but extracts layers to specified directory
+# Exit codes:
+#   EXIT_OPERATION_FAILED - If Skopeo copy fails
 extract_layers_skopeo() {
     local image_file="$1"
     local extract_dir="$2"
@@ -334,7 +349,7 @@ extract_image_layers() {
     verbose "Image source before detection: '$image_source'"
     detect_image_source "$image_source"
 
-    if [[ $USE_SKEPEO -eq 1 ]]; then
+    if [[ $USE_SKOPEO -eq 1 ]]; then
         # Use Skopeo for local image file
         extract_layers_skopeo "$IMAGE_FILE" "$extract_dir" "$SOURCE_FORMAT"
     else
@@ -459,7 +474,13 @@ get_layer_list() {
             fi
 
             if [[ -n "$manifest_digest" ]]; then
-                local actual_manifest="${manifest_file%/*}/blobs/sha256/${manifest_digest}"
+                local actual_manifest=""
+                # Check if manifest file is already in blobs directory
+                if [[ "$manifest_file" == */blobs/sha256/* ]]; then
+                    actual_manifest="${manifest_file%/*}/${manifest_digest}"
+                else
+                    actual_manifest="${manifest_file%/*}/blobs/sha256/${manifest_digest}"
+                fi
                 verbose "Found actual manifest: $actual_manifest"
 
                 if [[ -f "$actual_manifest" ]]; then
@@ -667,6 +688,12 @@ create_delta_package() {
     # Get target manifest and layer list
     local target_manifest_file=$(get_image_manifest "$target_temp_dir")
     local target_layers=$(get_layer_list "$target_manifest_file")
+
+    # If manifest is an index (multi-arch), use the actual image manifest
+    if jq -e '.manifests' "$target_manifest_file" >/dev/null 2>&1; then
+        verbose "Resolving nested OCI index manifest"
+        target_manifest_file=$(get_image_manifest "$target_temp_dir")
+    fi
 
     # Create delta package directory
     local delta_dir=$(mktemp -d)
@@ -1308,7 +1335,7 @@ parse_args() {
     done
 
     # Add new options for Skopeo integration
-    TEMP=$(getopt -o m:c:l:s:t:p:vdh --long method:,compression:,level:,source-format:,target-format:,platform:,verbose,dry-run,help,version -n "$0" -- "${args[@]}")
+    TEMP=$(getopt -o m:c:l:s:t:p:vdfh --long method:,compression:,level:,source-format:,target-format:,platform:,verbose,dry-run,force,help,version -n "$0" -- "${args[@]}")
 
     if [ $? != 0 ] ; then error "Terminating..." $EXIT_ERROR ; exit $EXIT_ERROR ; fi
 
@@ -1422,6 +1449,12 @@ parse_args() {
 
 # Main function
 main() {
+    local BASE_IMAGE=""
+    local TARGET_IMAGE=""
+    local DELTA_PACKAGE=""
+    local RECONSTRUCTED_IMAGE=""
+    local ACTION=""
+
     parse_args "$@"
     validate_inputs
     setup_environment
