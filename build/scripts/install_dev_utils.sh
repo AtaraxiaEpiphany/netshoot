@@ -87,10 +87,11 @@ claude plugin marketplace add OthmanAdi/planning-with-files
 claude plugin marketplace add K-Dense-AI/claude-scientific-skills
 claude plugin marketplace add jarrodwatts/claude-hud
 claude plugin marketplace add kepano/obsidian-skills
+claude plugin marketplace add affaan-m/everything-claude-code
 
 #claude plugin install document-skills@anthropic-agent-skills
 #claude plugin install example-skills@anthropic-agent-skills
-
+claude plugin install superpowers@superpowers-marketplace
 
 pipx install superclaude && superclaude install
 npm install -g @fission-ai/openspec@latest

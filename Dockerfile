@@ -92,6 +92,9 @@ RUN apt-get update \
 	  linux-tools-generic \
 	  linux-tools-$(uname -r) \
 	  skopeo \
+	  ffmpeg \
+	  qemu-system \
+	  # Development and Debugging \
 	  # Development and Debugging \
 	  git \
 	  httpie \
