@@ -82,11 +82,20 @@ log_step "Install claude code and config claude code"
 curl -fsSL https://claude.ai/install.sh | bash
 claude plugin marketplace add anthropics/skills
 claude plugin marketplace add anthropics/claude-plugins-official
+claude plugin marketplace add obra/superpowers-marketplace
+claude plugin marketplace add OthmanAdi/planning-with-files
+claude plugin marketplace add K-Dense-AI/claude-scientific-skills
+claude plugin marketplace add jarrodwatts/claude-hud
+claude plugin marketplace add kepano/obsidian-skills
+claude plugin marketplace add affaan-m/everything-claude-code
+
 #claude plugin install document-skills@anthropic-agent-skills
 #claude plugin install example-skills@anthropic-agent-skills
-
+claude plugin install superpowers@superpowers-marketplace
 
 pipx install superclaude && superclaude install
+npm install -g @fission-ai/openspec@latest
+npm install -g @anthropic-ai/claude-code
 npm install -g @musistudio/claude-code-router
 npm install -g @mariozechner/claude-trace
 
@@ -120,13 +129,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## jqplayground
 npm install -g next
-mkdir -p ~/Workspaces/Projects \
-	&& cd ~/Workspaces/Projects/ \
-	&& git clone --depth=1 https://github.com/jqlang/playground \
-	&& cd playground \
-	&& npm install \
-	&& npm run build
+mkdir -p ~/Workspaces/Projects 
+	#&& cd ~/Workspaces/Projects/ 
+	#&& git clone --depth=1 https://github.com/jqlang/playground \
+	#&& cd playground \
+	#&& npm install \
+	#&& npm run build
 
 ## mcat: install first to load cargo env
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Skardyy/mcat/releases/download/v0.4.6/mcat-installer.sh | sh
-

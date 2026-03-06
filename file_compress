@@ -3,22 +3,27 @@ set -euo pipefail
 
 # Compression utility following Unix philosophy
 # Supports multiple compression formats with progress tracking
+# Added parallel chunk compression for large files
 
-VERSION="1.0.0"
+VERSION="1.2.0"
 
 # Default settings
 COMPRESSION="zstd"
 COMPRESSION_LEVEL=22  # Maximum compression level for zstd by default
 THREADS=$(( $(nproc) * 2 ))
+CHUNK_SIZE=0        # Default: disabled
 OUTPUT_FILE="-"
 VERBOSE=0
+DRY_RUN=0            # New flag for dry run mode
+MEMLIMIT="1000MB"    # Memory limit for compression (e.g., 1G, 500M)
+VERIFY="false"      # Generate and verify SHA-256 checksum
 
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m'
+NC='\033[0m'       # No Color
 
 # Error logging
 error() {
@@ -51,6 +56,13 @@ setup_environment() {
     if ! command -v pv >/dev/null 2>&1; then
         verbose "pv (pipe viewer) not found. Progress tracking will be disabled."
     fi
+
+    # Check for parallel if chunking enabled
+    if [[ $CHUNK_SIZE -gt 0 ]]; then
+        if ! command -v parallel >/dev/null 2>&1; then
+            error "GNU parallel is required for chunked compression"
+        fi
+    fi
 }
 
 # Check if a command exists
@@ -68,6 +80,7 @@ compress() {
     local format="$3"
     local level="$4"
     local threads="$5"
+    local memlimit="${6:-}"
 
     # Progress tracking
     local use_pv=0
@@ -76,13 +89,13 @@ compress() {
     # Get input file size for progress tracking
     local total_size=0
     local input_file="$input"
+    local is_stdin=0
 
-    # For stdin, measure input size before compression
+    # For stdin, handle streaming directly without buffering to temp file
     if [[ "$input" == "-" ]]; then
-        input_file=$(mktemp)
-        trap "rm -f '$input_file'" EXIT
-        cat > "$input_file"
-        total_size=$(stat -c %s "$input_file" 2>/dev/null || echo 0)
+        is_stdin=1
+        # If we can't get size from stdin, we'll skip size-based progress
+        total_size=0
     else
         total_size=$(stat -c %s "$input_file" 2>/dev/null || echo 0)
     fi
@@ -94,36 +107,21 @@ compress() {
     perform_compression() {
         # Log minimal verbose information
         if [[ $VERBOSE -eq 1 ]]; then
-            verbose "Compressing (format: $format, level: $level)"
-        fi
-
-        # Ensure input is available
-        if [[ -n "$input_file" && ! -f "$input_file" ]]; then
-            error "Input file does not exist: $input_file"
+            verbose "Compressing (format: $format, level: $level, memory limit: ${memlimit:-unlimited})"
         fi
 
         # Prepare base options for each format
         case "$format" in
             gzip)
-                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
-                    pv -pterb "$input_file" 2>/dev/null | gzip -$level || error "Gzip compression failed"
-                else
-                    gzip -$level || error "Gzip compression failed"
-                fi
+                gzip -$level - || error "Gzip compression failed"
                 ;;
             bzip2)
-                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
-                    pv -pterb "$input_file" 2>/dev/null | bzip2 -$level || error "Bzip2 compression failed"
-                else
-                    bzip2 -$level || error "Bzip2 compression failed"
-                fi
+                bzip2 -$level - || error "Bzip2 compression failed"
                 ;;
             xz)
-                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
-                    pv -pterb "$input_file" 2>/dev/null | xz -$level || error "XZ compression failed"
-                else
-                    xz -$level || error "XZ compression failed"
-                fi
+                local xz_opts="-$level"
+                [[ -n "$memlimit" ]] && xz_opts="$xz_opts --memory=$memlimit"
+                xz $xz_opts - || error "XZ compression failed"
                 ;;
             zstd)
                 local zstd_opts=""
@@ -137,12 +135,8 @@ compress() {
                 else
                     zstd_opts="-$level"
                 fi
-
-                if [[ $use_pv -eq 1 && -n "$input_file" && -f "$input_file" ]]; then
-                    pv -pterb "$input_file" 2>/dev/null | zstd $zstd_opts --threads=$threads || error "Zstd compression failed"
-                else
-                    zstd $zstd_opts --threads=$threads || error "Zstd compression failed"
-                fi
+                [[ -n "$memlimit" ]] && zstd_opts="$zstd_opts --memory=$memlimit"
+                zstd $zstd_opts --threads=$threads --progress - || error "Zstd compression failed"
                 ;;
             none)
                 cat
@@ -155,13 +149,27 @@ compress() {
 
     # Progress wrapper
     wrapped_compression() {
-        # If pv is available, use it with progress bar
-        if [[ $use_pv -eq 1 && -n "$input_file" ]]; then
+        # For zstd, use built-in --progress instead of pv to avoid duplicate progress
+        if [[ "$format" == "zstd" ]]; then
+            verbose "Compressing with zstd progress tracking..."
+            if [[ $is_stdin -eq 1 ]]; then
+                perform_compression  # Read directly from stdin
+            else
+                perform_compression < "$input_file"
+            fi
+        elif [[ $use_pv -eq 1 && $is_stdin -eq 0 ]]; then
             verbose "Compressing with progress bar..."
-            pv -pterb -s "$total_size" "$input_file" 2>/dev/null | perform_compression
+            pv -pterb -s "$total_size" "$input_file" | perform_compression
+        elif [[ $use_pv -eq 1 && $is_stdin -eq 1 ]]; then
+            verbose "Compressing stdin with progress tracking (size unknown)..."
+            pv -pterb | perform_compression  # No size info for stdin
         else
             verbose "No progress bar available. Compressing..."
-            perform_compression < "$input_file"
+            if [[ $is_stdin -eq 1 ]]; then
+                perform_compression
+            else
+                perform_compression < "$input_file"
+            fi
         fi
     }
 
@@ -170,20 +178,72 @@ compress() {
     verbose "Input source: $input"
 
     # Ensure we handle both stdin and file inputs
-    if [[ "$input" == "-" ]]; then
-        # Ensure stdin is not a terminal
-        if [ -t 0 ]; then
-            error "No input provided via stdin (terminal input)"
-        fi
+    wrapped_compression
+}
 
-        # Read stdin
-        perform_compression
-    else
-        # Use file input
-        if [[ ! -f "$input" ]]; then
-            error "Input file not found: $input"
+# Parallel chunk compression for large files
+compress_chunked() {
+    local input_file="$1"
+    local output_file="$2"
+    local tmp_dir="$3"
+
+    # File extension based on compression format
+    local file_ext=""
+    case "$COMPRESSION" in
+        gzip) file_ext="gz" ;;
+        bzip2) file_ext="bz2" ;;
+        xz) file_ext="xz" ;;
+        zstd) file_ext="zst" ;;
+        none) file_ext="" ;;
+    esac
+
+    verbose "Splitting $input_file into chunks of ${CHUNK_SIZE_BYTES} bytes..."
+    split -b "${CHUNK_SIZE_BYTES}" "$input_file" "${tmp_dir}/chunk_"
+
+    # Create base command for chunk compression
+    local base_cmd=( "$0" )
+    base_cmd+=( "--compression" "$COMPRESSION" )
+    base_cmd+=( "--level" "$COMPRESSION_LEVEL" )
+    base_cmd+=( "--threads" "1" )
+    base_cmd+=( "--memlimit" "$MEMLIMIT" )
+    base_cmd+=( "--output" "#OUTPUT#" )
+    [[ $VERBOSE -eq 1 ]] && base_cmd+=( "--verbose" )
+
+    # Compress chunks in parallel
+    local chunk_files
+    chunk_files=("$tmp_dir"/chunk_*)
+    local chunk_count=${#chunk_files[@]}
+    verbose "Compressing $chunk_count chunks using $THREADS threads..."
+
+    # Use xargs for parallel processing (simpler and more reliable)
+    # Build the base command for each chunk
+    local base_cmd="'$0' --compression '$COMPRESSION' --level '$COMPRESSION_LEVEL' --threads 1 --memlimit '$MEMLIMIT'"
+
+    # Process chunks in parallel using xargs
+    printf '%s\n' "${chunk_files[@]}" | xargs -I {} -P "$THREADS" bash -c "
+        input_chunk=\"{}\"
+        output_file=\"\${input_chunk}.${file_ext}\"
+        $base_cmd --output \"\$output_file\" \"\$input_chunk\"
+    " || error "Chunk compression failed"
+
+    # Concatenate compressed chunks
+    verbose "Concatenating compressed chunks..."
+
+    # For all formats, use simple concatenation
+    # This works reliably for zstd and other formats
+    local compressed_chunks=("${tmp_dir}"/*.$file_ext)
+    if [[ ${#compressed_chunks[@]} -eq 0 ]]; then
+        error "No compressed chunks found"
+    fi
+
+    cat "${compressed_chunks[@]}" > "$output_file" || error "File concatenation failed"
+
+    # Validate the concatenated file for zstd
+    if [[ "$COMPRESSION" == "zstd" ]]; then
+        verbose "Validating concatenated zstd file..."
+        if ! zstd -t "$output_file" >/dev/null 2>&1; then
+            error "Concatenated zstd file validation failed"
         fi
-        perform_compression < "$input"
     fi
 }
 
@@ -193,6 +253,8 @@ usage() {
 Usage: $(basename "$0") [OPTIONS] [INPUT_FILE]
 
 Compress files or stdin using various compression formats.
+
+New feature: Parallel chunk compression for large files (requires GNU parallel)
 
 Compression Formats:
   zstd: Best overall compression (recommended)
@@ -208,33 +270,69 @@ Compression Formats:
 Options:
   -c, --compression FORMAT   Specify compression method
                              Choices: zstd (default), gzip, bzip2, xz, none
+  -s, --chunk-size SIZE      Split large files into chunks for parallel compression
+                             Example: 1G, 500M. Disabled by default.
   -l, --level LEVEL         Compression intensity
                              zstd: -100 to 22
                              others: 1-9
-  -j, --threads THREADS     Parallel compression threads (zstd only)
+  -j, --threads THREADS     Parallel compression threads (zstd only, or when chunking)
                              Default: CPU cores * 2
   -o, --output FILE         Output file path
                              Default: stdout
   -v, --verbose             Show detailed compression info
+  -m, --memory, --memlimit SIZE  Memory limit for compression (e.g., 1G, 500M)
+                             Supported by: zstd, xz
+  --verify                  Generate and verify SHA-256 checksum
+  -d, --dry-run             Simulate compression without writing output
   -h, --help                Display this help message
   --version                 Show script version
 
+Combined options:
+  Short options can be combined, e.g., '-vd' for verbose + dry-run mode
+
 Examples:
+  # Standard compression
   echo 'hello' | $0                  # Max zstd compression
   $0 -c gzip file.txt                # Max gzip compression
+
+  # Parallel chunk compression for large files
+  $0 -s 1G -o large.zst hugefile     # Split into 1GB chunks
+  $0 -s 500M -j 16 bigfile.tar      # 500MB chunks with 16 threads
+
+  # Other examples
   $0 -c zstd -l -10 file.txt         # Fast zstd compression
   $0 -o compressed.zst file.txt      # Output to specific file
+  $0 --verify -o compressed.zst file.txt  # Compress with checksum verification
+  $0 -m 1G -o compressed.zst large_file.bin  # Limit memory to 1GB
+  $0 --dry-run file.txt              # Simulate compression
 
 Dependencies:
   - zstd, gzip, bzip2, xz recommended
   - pv (optional) for progress tracking
+  - sha256sum (optional) for verification
+  - GNU parallel required for chunked compression
 EOF
     exit 0
 }
 
 # Parse command-line arguments
 parse_args() {
-    TEMP=$(getopt -o c:l:j:o:vh --long compression:,level:,threads:,output:,verbose,help,version -n "$0" -- "$@")
+    # Pre-process combined short options like -vd -> -v -d
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" =~ ^-[^-].{2,}$ ]]; then
+            # Process combined flags like -vo
+            local flags="${1:1}"  # Remove the leading dash
+            for ((i=0; i<${#flags}; i++)); do
+                args+=("-"${flags:$i:1})
+            done
+        else
+            args+=("$1")
+        fi
+        shift
+    done
+
+    TEMP=$(getopt -o c:s:l:j:o:vm:dh --long compression:,chunk-size:,level:,threads:,output:,verbose,memory:,memlimit:,verify,dry-run,help,version -n "$0" -- "${args[@]}")
 
     if [ $? != 0 ] ; then error "Terminating..." >&2 ; exit 1 ; fi
 
@@ -244,6 +342,10 @@ parse_args() {
         case "$1" in
             -c|--compression)
                 COMPRESSION="$2"
+                shift 2
+                ;;
+            -s|--chunk-size)
+                CHUNK_SIZE="$2"
                 shift 2
                 ;;
             -l|--level)
@@ -262,11 +364,23 @@ parse_args() {
                 VERBOSE=1
                 shift
                 ;;
+            -m|--memory|--memlimit)
+                MEMLIMIT="$2"
+                shift 2
+                ;;
+            --verify)
+                VERIFY=true
+                shift
+                ;;
+            -d|--dry-run)
+                DRY_RUN=1
+                shift
+                ;;
             -h|--help)
                 usage
                 ;;
             --version)
-                echo "chunkit version $VERSION"
+                echo "file_compress version $VERSION"
                 exit 0
                 ;;
             --)
@@ -286,7 +400,23 @@ parse_args() {
     elif [ $# -eq 1 ]; then
         # Input file specified
         INPUT_FILE="$1"
-        [ ! -f "$INPUT_FILE" ] && error "Input file not found: $INPUT_FILE"
+
+        # Skip file checks for stdin
+        if [ "$INPUT_FILE" != "-" ]; then
+            # Enhanced file check with more detailed error messages
+            if [ ! -e "$INPUT_FILE" ]; then
+                error "Input file or directory does not exist: $INPUT_FILE"
+            elif [ ! -f "$INPUT_FILE" ]; then
+                # Additional check for file type
+                if [ -d "$INPUT_FILE" ]; then
+                    error "Input is a directory, not a file: $INPUT_FILE"
+                else
+                    error "Input is not a regular file: $INPUT_FILE"
+                fi
+            elif [ ! -r "$INPUT_FILE" ]; then
+                error "Input file is not readable: $INPUT_FILE"
+            fi
+        fi
     else
         error "Too many arguments. Use -h for help."
     fi
@@ -300,22 +430,51 @@ validate_inputs() {
         *) error "Unsupported compression format: $COMPRESSION" ;;
     esac
 
-    # Validate compression level
-    case "$COMPRESSION" in
-        zstd)
-            [[ "$COMPRESSION_LEVEL" -lt -100 || "$COMPRESSION_LEVEL" -gt 22 ]] &&
-                error "Zstd level must be between -100 and 22"
-            ;;
-        *)
-            [[ "$COMPRESSION_LEVEL" -lt 1 || "$COMPRESSION_LEVEL" -gt 9 ]] &&
-                error "Compression level must be between 1 and 9"
-            ;;
-    esac
+    # Set appropriate default compression level based on format
+    if [[ "$COMPRESSION" == "zstd" ]]; then
+        # Default for zstd is 22 (max), but allow -100 to 22
+        [[ "$COMPRESSION_LEVEL" -lt -100 || "$COMPRESSION_LEVEL" -gt 22 ]] &&
+            error "Zstd level must be between -100 and 22"
+    else
+        # For other formats, ensure level is between 1-9, default to 9 if necessary
+        if [[ "$COMPRESSION_LEVEL" -lt 1 || "$COMPRESSION_LEVEL" -gt 9 ]]; then
+            verbose "Compression level $COMPRESSION_LEVEL invalid for $COMPRESSION. Using default level 9."
+            COMPRESSION_LEVEL=9
+        fi
+    fi
 
     # Validate threads
     [[ ! "$THREADS" =~ ^[0-9]+$ ]] && error "Threads must be a positive integer"
 
-    # Default to max compression for all formats
+    # Validate chunking
+    if [[ "$CHUNK_SIZE" != "0" ]]; then  # Use string comparison to handle '100M'
+        if [[ "$INPUT_FILE" == "-" ]]; then
+            error "Chunking is not supported for stdin input"
+        fi
+
+        # Validate chunk size format
+        if ! [[ "$CHUNK_SIZE" =~ ^[0-9]+[KMG]?$ ]]; then
+            error "Invalid chunk size format: $CHUNK_SIZE. Use format like '100M', '1G'"
+        fi
+
+        # Store chunk size in bytes for splitting
+        if [[ "$CHUNK_SIZE" =~ ([0-9]+)([KMG])$ ]]; then
+            local size_value=${BASH_REMATCH[1]}
+            local size_unit=${BASH_REMATCH[2]}
+            case $size_unit in
+                K) CHUNK_SIZE_BYTES=$((size_value * 1024)) ;;
+                M) CHUNK_SIZE_BYTES=$((size_value * 1024 * 1024)) ;;
+                G) CHUNK_SIZE_BYTES=$((size_value * 1024 * 1024 * 1024)) ;;
+            esac
+        else
+            # If no suffix, treat as bytes
+            CHUNK_SIZE_BYTES=$CHUNK_SIZE
+        fi
+
+        verbose "Chunk size: $CHUNK_SIZE (${CHUNK_SIZE_BYTES} bytes)"
+    fi
+
+    # Default to max compression for specific cases
     if [[ "$COMPRESSION" == "zstd" && "$COMPRESSION_LEVEL" -eq 10 ]]; then
         COMPRESSION_LEVEL=22  # Maximum zstd compression
     elif [[ "$COMPRESSION" != "zstd" && "$COMPRESSION_LEVEL" -eq 6 ]]; then
@@ -334,60 +493,121 @@ main() {
         verbose "  Format: $COMPRESSION"
         verbose "  Level: $COMPRESSION_LEVEL"
         verbose "  Threads: $THREADS"
+        verbose "  Memory Limit: ${MEMLIMIT:-unlimited}"
+        verbose "  Chunk Size: ${CHUNK_SIZE:-disabled}"
         verbose "  Input: $INPUT_FILE"
         verbose "  Output: $OUTPUT_FILE"
+        verbose "  Verify: ${VERIFY:-false}"
     fi
 
-    # Prepare temporary files for size tracking
-    input_temp=$(mktemp)
-    output_temp=$(mktemp)
-    trap "rm -f '$input_temp' '$output_temp'" EXIT
+    # Handle dry run mode with streaming support
+    if [[ $DRY_RUN -eq 1 ]]; then
+        verbose "Dry run mode: Simulating compression"
 
-    # Capture input for size tracking
-    if [[ "$INPUT_FILE" == "-" ]]; then
-        cat > "$input_temp"
-        input_file="$input_temp"
+        # For stdin in dry run, we still need to read it to get size
+        local input_size=0
+        if [[ "$INPUT_FILE" == "-" ]]; then
+            local input_temp=$(mktemp)
+            trap "rm -f '$input_temp'" EXIT
+            cat > "$input_temp"
+            input_size=$(stat -c %s "$input_temp" 2>/dev/null || echo 0)
+        else
+            input_size=$(stat -c %s "$INPUT_FILE" 2>/dev/null || echo 0)
+        fi
+
+        # Estimate compression ratio
+        if [[ "$COMPRESSION" == "zstd" ]]; then
+            estimated_ratio=0.5  # Typically 50% of original size
+        elif [[ "$COMPRESSION" == "gzip" ]]; then
+            estimated_ratio=0.6  # Typically 60% of original size
+        elif [[ "$COMPRESSION" == "bzip2" ]]; then
+            estimated_ratio=0.4  # Typically 40% of original size
+        elif [[ "$COMPRESSION" == "xz" ]]; then
+            estimated_ratio=0.3  # Typically 30% of original size
+        else
+            estimated_ratio=1
+        fi
+
+        estimated_output_size=$(echo "scale=0; $input_size * $estimated_ratio" | bc)
+
+        verbose "Dry Run Compression Estimate:"
+        verbose "  Compression: $COMPRESSION, Level: $COMPRESSION_LEVEL"
+        if [[ $CHUNK_SIZE -ne 0 ]]; then
+            verbose "  Chunking: enabled, size $CHUNK_SIZE"
+            verbose "  Estimated Parallelization: $THREADS threads"
+        else
+            verbose "  Chunking: disabled"
+        fi
+        verbose "  Input Size:  $(numfmt --to=iec-i --suffix=B --format=\"%.1f\" \"$input_size\")"
+        verbose "  Estimated Output Size: $(numfmt --to=iec-i --suffix=B --format=\"%.1f\" \"$estimated_output_size\")"
+
+        exit 0
+    fi
+
+    # Perform compression with streaming
+    if [[ "$CHUNK_SIZE" != "0" && "$INPUT_FILE" != "-" ]]; then
+        # Create temporary directory for chunks
+        tmp_dir=$(mktemp -d)
+        trap "rm -rf '$tmp_dir'" EXIT
+
+        # Perform parallel chunk compression
+        compress_chunked "$INPUT_FILE" "$OUTPUT_FILE" "$tmp_dir"
+
+        # Generate checksum if verification is requested
+        if [[ "${VERIFY:-false}" == "true" && "$OUTPUT_FILE" != "-" && -f "$OUTPUT_FILE" ]]; then
+            local checksum=$(sha256sum "$OUTPUT_FILE" | awk '{print $1}')
+            echo "$checksum  $OUTPUT_FILE" > "${OUTPUT_FILE}.sha256"
+            verbose "Generated checksum: ${OUTPUT_FILE}.sha256"
+        fi
     else
-        input_file="$INPUT_FILE"
+        # Use standard compression
+        set +e  # Disable exit on error to capture the true result
+        local compression_status=0
+        local input_file="$INPUT_FILE"
+
+        if [[ "$OUTPUT_FILE" == "-" ]]; then
+            # Stream directly to stdout - true streaming
+            compress "$input_file" - "$COMPRESSION" "$COMPRESSION_LEVEL" "$THREADS" "$MEMLIMIT"
+            compression_status=$?
+        else
+            # Output to file with optional checksum
+            compress "$input_file" - "$COMPRESSION" "$COMPRESSION_LEVEL" "$THREADS" "$MEMLIMIT" > "$OUTPUT_FILE"
+            compression_status=$?
+
+            # Generate checksum if verification is requested
+            if [[ "${VERIFY:-false}" == "true" && $compression_status -eq 0 ]]; then
+                local checksum=$(sha256sum "$OUTPUT_FILE" | awk '{print $1}')
+                echo "$checksum  $OUTPUT_FILE" > "${OUTPUT_FILE}.sha256"
+                verbose "Generated checksum: ${OUTPUT_FILE}.sha256"
+            fi
+        fi
+        set -e  # Re-enable exit on error
     fi
 
-    # Perform compression
-    set +e  # Disable exit on error to capture the true result
-    if [[ "$OUTPUT_FILE" == "-" ]]; then
-        # Output to stdout with binary mode, always write to output_temp
-        compress "$input_file" - "$COMPRESSION" "$COMPRESSION_LEVEL" "$THREADS" > "$output_temp"
-        compression_status=$?
+    # Compute compression ratio if possible
+    if [[ $VERBOSE -eq 1 && "$INPUT_FILE" != "-" && "$OUTPUT_FILE" != "-" && -f "$INPUT_FILE" && -f "$OUTPUT_FILE" ]]; then
+        local input_size=$(stat -c %s "$INPUT_FILE")
+        local output_size=$(stat -c %s "$OUTPUT_FILE")
 
-        # Ensure output is written to stdout
-        cat "$output_temp"
-    else
-        # Output to specified file
-        compress "$input_file" - "$COMPRESSION" "$COMPRESSION_LEVEL" "$THREADS" > "$OUTPUT_FILE"
-        compression_status=$?
-        output_temp="$OUTPUT_FILE"
-    fi
-    set -e  # Re-enable exit on error
-
-    # Compute compression ratio for verbose mode
-    if [[ $VERBOSE -eq 1 ]]; then
-        input_size=$(stat -c %s "$input_file")
-        output_size=$(stat -c %s "$output_temp")
-
-        # Compute compression ratio (0-1)
-        compression_ratio=$(echo "scale=2; $output_size / $input_size" | bc)
-
-        # Convert to percentage for display
-        compression_percent=$(echo "scale=2; (1 - $output_size / $input_size) * 100" | bc)
+        local compression_ratio=$(echo "scale=2; $output_size / $input_size" | bc)
+        local compression_percent=$(echo "scale=2; (1 - $output_size / $input_size) * 100" | bc)
 
         verbose "Compression Ratio:"
-        verbose "  Input Size:  $(numfmt --to=iec-i --suffix=B --format="%.1f" "$input_size")"
-        verbose "  Output Size: $(numfmt --to=iec-i --suffix=B --format="%.1f" "$output_size")"
+        verbose "  Input Size:  $(numfmt --to=iec-i --suffix=B --format=%.1f $input_size)"
+        verbose "  Output Size: $(numfmt --to=iec-i --suffix=B --format=%.1f $output_size)"
         verbose "  Ratio:       $compression_ratio"
         verbose "  Compression: $compression_percent%"
     fi
 
-    # Ensure successful exit
-    exit $compression_status
+    # Verify compressed file if requested
+    if [[ "${VERIFY:-false}" == "true" && "$OUTPUT_FILE" != "-" && -f "${OUTPUT_FILE}.sha256" ]]; then
+        verbose "Verifying compressed file integrity..."
+        if sha256sum -c "${OUTPUT_FILE}.sha256" >/dev/null 2>&1; then
+            verbose "File integrity verified"
+        else
+            error "File integrity check failed: $OUTPUT_FILE"
+        fi
+    fi
 }
 
 # Run the script
