@@ -13,7 +13,8 @@
 #
 # Usage:
 #   git clone <this-repo> && cd netshoot
-#   bash build/scripts/setup_wsl.sh
+#   bash build/scripts/setup_wsl.sh            # Run / Resume
+#   bash build/scripts/setup_wsl.sh --reset    # Clear checkpoint and restart
 #
 # After setup:
 #   wsl --export <distro> netshoot.tar        # Export
@@ -24,6 +25,13 @@
 #
 
 set -euo pipefail
+
+# --reset: clear checkpoint and exit
+if [[ "${1:-}" == "--reset" ]]; then
+    rm -f "${CHECKPOINT_FILE:-$HOME/.wsl_setup_checkpoint}"
+    echo "[SETUP] Checkpoint cleared."
+    exit 0
+fi
 
 # ============================================================
 # Configuration
@@ -71,6 +79,7 @@ esac
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 log()    { echo -e "\n${GREEN}[SETUP]${NC} $1"; }
@@ -78,10 +87,39 @@ warn()   { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error()  { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
 # ============================================================
+# Checkpoint System
+# ============================================================
+
+CHECKPOINT_FILE="${CHECKPOINT_FILE:-$TARGET_HOME/.wsl_setup_checkpoint}"
+
+phase() {
+    local num=$1
+    local desc="$2"
+    if grep -q "^phase_${num}=done$" "$CHECKPOINT_FILE" 2>/dev/null; then
+        log "Phase ${num}/19: ${desc} ${CYAN}[CACHED]${NC}"
+        return 1
+    fi
+    log "Phase ${num}/19: ${desc}"
+    return 0
+}
+
+phase_done() {
+    echo "phase_${1}=done" >> "$CHECKPOINT_FILE"
+}
+
+# Show resume info
+if [[ -f "$CHECKPOINT_FILE" ]]; then
+    cached=$(grep -c '=done$' "$CHECKPOINT_FILE" 2>/dev/null || echo 0)
+    if [[ "$cached" -gt 0 ]]; then
+        log "Resuming from checkpoint ($cached/19 phases cached, file: $CHECKPOINT_FILE)"
+    fi
+fi
+
+# ============================================================
 # Phase 1: System Packages
 # ============================================================
 
-log "Phase 1/19: Installing system packages..."
+if phase 1 "Installing system packages..."; then
 
 # Prerequisites for add-apt-repository and LinuxMirrors
 sudo apt-get update
@@ -133,45 +171,52 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
     dnsutils python3-scapy tshark mitmproxy \
     \
     `# --- Modern Unix ---` \
-    bat fd-find ripgrep hyperfine 
-    # \
-    # `# --- VNC Server ---` \
-    # tracker dbus dbus-x11 gnome-session xdg-utils libx11-dev libxext-dev \
-    # gnome-panel gnome-settings-daemon metacity nautilus gnome-terminal \
-    # ubuntu-desktop tightvncserver
+    bat fd-find ripgrep hyperfine
+
+phase_done 1
+fi
 
 # ============================================================
 # Phase 2: Locale Setup
 # ============================================================
 
-log "Phase 2/19: Setting up locale..."
+if phase 2 "Setting up locale..."; then
 
 sudo locale-gen en_US en_US.UTF-8
 sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+
+phase_done 2
+fi
 
 # ============================================================
 # Phase 3: Default Shell
 # ============================================================
 
-log "Phase 3/19: Setting zsh as default shell..."
+if phase 3 "Setting zsh as default shell..."; then
 
 sudo chsh -s "$(which zsh)" "$TARGET_USER"
+
+phase_done 3
+fi
 
 # ============================================================
 # Phase 4: Workspace Directories
 # ============================================================
 
-log "Phase 4/19: Creating workspace directories..."
+if phase 4 "Creating workspace directories..."; then
 
 mkdir -p "$TARGET_HOME/Workspaces/Git"
 mkdir -p "$TARGET_HOME/Workspaces/Projects"
 mkdir -p "$TARGET_HOME/Workspaces/Utils"
 
+phase_done 4
+fi
+
 # ============================================================
 # Phase 5: External Binaries (GitHub Releases)
 # ============================================================
 
-log "Phase 5/19: Fetching external binaries from GitHub releases..."
+if phase 5 "Fetching external binaries from GitHub releases..."; then
 
 BIN_DIR="/tmp/wsl_binaries"
 rm -rf "$BIN_DIR" && mkdir -p "$BIN_DIR"
@@ -250,19 +295,25 @@ log "  Installing binaries to /usr/local/bin..."
 sudo cp "$BIN_DIR"/* /usr/local/bin/ 2>/dev/null || true
 rm -rf "$BIN_DIR"
 
+phase_done 5
+fi
+
 # ============================================================
 # Phase 6: Zim Framework
 # ============================================================
 
-log "Phase 6/19: Installing Zim framework..."
+if phase 6 "Installing Zim framework..."; then
 
 zsh -c 'curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh' || warn "Zim install had issues"
+
+phase_done 6
+fi
 
 # ============================================================
 # Phase 7: Dotfiles and Configurations
 # ============================================================
 
-log "Phase 7/19: Copying dotfiles..."
+if phase 7 "Copying dotfiles..."; then
 
 rsync -avzh "$DOTFILES_DIR/" "$TARGET_HOME/"
 
@@ -276,11 +327,14 @@ sed -i 's|/home/docker/|$HOME/|g' "$TARGET_HOME/.xstartup" 2>/dev/null || true
 grep -q '\$HOME/go/bin' "$TARGET_HOME/.shellrc" 2>/dev/null || \
     sed -i '/^export PATH.*\/usr\/local\/go\/bin/a export PATH="$PATH:$HOME/go/bin"' "$TARGET_HOME/.shellrc"
 
+phase_done 7
+fi
+
 # ============================================================
 # Phase 8: Zim Modules + p10k gitstatus
 # ============================================================
 
-log "Phase 8/19: Installing Zim modules..."
+if phase 8 "Installing Zim modules..."; then
 
 zsh -c 'source ~/.zshrc 2>/dev/null; zimfw install' || warn "Zim module install had issues"
 
@@ -289,11 +343,14 @@ if [[ -f "$ZIM_HOME/modules/powerlevel10k/gitstatus/install" ]]; then
     "$ZIM_HOME/modules/powerlevel10k/gitstatus/install" -f || warn "gitstatus install failed"
 fi
 
+phase_done 8
+fi
+
 # ============================================================
 # Phase 9: nvm + Node.js
 # ============================================================
 
-log "Phase 9/19: Installing nvm and Node.js LTS..."
+if phase 9 "Installing nvm and Node.js LTS..."; then
 
 export NVM_DIR="$TARGET_HOME/.nvm"
 if [[ ! -d "$NVM_DIR" ]]; then
@@ -307,16 +364,19 @@ set +u
 nvm install --lts && nvm use --lts
 set -u
 
+phase_done 9
+fi
+
 # ============================================================
 # Phase 10: Neovim + LazyVim
 # ============================================================
+
+if phase 10 "Installing Neovim..."; then
 
 NVIM_ARCH="x86_64"
 case "$(uname -m)" in
     aarch64) NVIM_ARCH="arm64" ;;
 esac
-
-log "Phase 10/19: Installing Neovim..."
 
 curl -LO "https://github.com/neovim/neovim/releases/latest/download/nvim-linux-${NVIM_ARCH}.tar.gz"
 sudo rm -rf "/opt/nvim-linux-${NVIM_ARCH}"
@@ -333,8 +393,6 @@ if [[ ! -d "$TARGET_HOME/.config/nvim" ]]; then
     git clone --depth=1 https://github.com/LazyVim/starter "$TARGET_HOME/.config/nvim"
 fi
 
-# tree-sitter-cli -> install via npm mirror in internal network
-
 # Copy custom nvim config (from dotfiles rsync'd to $HOME)
 mkdir -p "$TARGET_HOME/.config/nvim/lua/config"
 cp -f "$TARGET_HOME/init.lua" "$TARGET_HOME/.config/nvim/init.lua"
@@ -345,41 +403,53 @@ npm install -g tree-sitter-cli
 # Sync LazyVim plugins
 nvim --headless "+Lazy! sync" +qa || warn "LazyVim sync had issues"
 
+phase_done 10
+fi
+
 # ============================================================
 # Phase 11: fzf
 # ============================================================
 
-log "Phase 11/19: Installing fzf..."
+if phase 11 "Installing fzf..."; then
 
 if [[ ! -d "$TARGET_HOME/.fzf" ]]; then
     git clone --depth 1 https://github.com/junegunn/fzf.git "$TARGET_HOME/.fzf"
 fi
 "$TARGET_HOME/.fzf/install" --bin
 
+phase_done 11
+fi
+
 # ============================================================
 # Phase 12: Podman
 # ============================================================
 
-log "Phase 12/19: Installing Podman..."
+if phase 12 "Installing Podman..."; then
 
 sudo apt-get install -y podman fuse-overlayfs || warn "Podman apt install failed"
 podman machine init 2>&1 || warn "podman machine init failed (may need virtualization support)"
+
+phase_done 12
+fi
 
 # ============================================================
 # Phase 13: uv (Python Package Manager)
 # ============================================================
 
-log "Phase 13/19: Installing uv..."
+if phase 13 "Installing uv..."; then
 
 curl -LsSf https://astral.sh/uv/install.sh | sh || warn "uv install failed"
+
+phase_done 13
+fi
 
 # ============================================================
 # Phase 14: Go
 # ============================================================
 
-GO_VERSION=1.26.3
+if phase 14 "Installing Go..."; then
 
-log "Phase 14/19: Installing Go ${GO_VERSION}..."
+GO_VERSION=1.26.3
 
 case "$(uname -m)" in
     x86_64) GO_ARCH="amd64" ;;
@@ -388,11 +458,14 @@ esac
 sudo rm -rf /usr/local/go
 wget -q -O- "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | sudo tar -C /usr/local -xzf -
 
+phase_done 14
+fi
+
 # ============================================================
 # Phase 15: Cargo (Rust Toolchain)
 # ============================================================
 
-log "Phase 15/19: Installing Rust toolchain (cargo)..."
+if phase 15 "Installing Rust toolchain (cargo)..."; then
 
 export RUSTUP_HOME="$TARGET_HOME/.rustup"
 export CARGO_HOME="$TARGET_HOME/.cargo"
@@ -402,11 +475,15 @@ export PATH="$CARGO_HOME/bin:$PATH"
 cargo install gping
 cargo install git-delta
 cargo install procs
+
+phase_done 15
+fi
+
 # ============================================================
 # Phase 16: Claude Code Ecosystem
 # ============================================================
 
-log "Phase 16/19: Installing Claude Code and ecosystem..."
+if phase 16 "Installing Claude Code and ecosystem..."; then
 
 export PATH="$TARGET_HOME/.local/bin:$PATH"
 
@@ -433,15 +510,14 @@ done
 # SuperClaude
 pipx install superclaude 2>/dev/null && superclaude install || warn "superclaude install failed"
 
-# npm global tools -> install via npm mirror in internal network
+phase_done 16
+fi
 
 # ============================================================
 # Phase 17: Modern Unix Tools
 # ============================================================
 
-log "Phase 17/19: Installing modern Unix tools..."
-
-# gtop -> install via npm mirror in internal network
+if phase 17 "Installing modern Unix tools..."; then
 
 # Go-based tools
 export PATH="/usr/local/go/bin:$TARGET_HOME/go/bin:$PATH"
@@ -452,27 +528,32 @@ go install github.com/charmbracelet/glow/v2@latest
 curl --proto '=https' --tlsv1.2 -LsSf \
     https://github.com/Skardyy/mcat/releases/download/v0.6.1/mcat-installer.sh | sh || warn "mcat install failed"
 
-# mermaid-cli -> install via npm mirror in internal network
+phase_done 17
+fi
 
 # ============================================================
 # Phase 18: Google Chrome
 # ============================================================
 
+if phase 18 "Installing Google Chrome..."; then
+
 if [[ "$(uname -m)" == "x86_64" ]]; then
-    log "Phase 18/19: Installing Google Chrome..."
     deb=$(mktemp)
     wget -O "$deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
     sudo dpkg -i "$deb" || sudo apt-get install -f -y
     rm -f "$deb"
 else
-    log "Phase 18/19: Skipping Chrome (not available for $(uname -m))"
+    warn "Chrome not available for $(uname -m), skipping"
+fi
+
+phase_done 18
 fi
 
 # ============================================================
 # Phase 19: WSL Configuration + Internal Package List
 # ============================================================
 
-log "Phase 19/19: Finalizing WSL configuration..."
+if phase 19 "Finalizing WSL configuration..."; then
 
 # /etc/wsl.conf - sets default user after import
 sudo tee /etc/wsl.conf > /dev/null <<EOF
@@ -662,9 +743,14 @@ NPMLIST
 # Fix home directory ownership
 sudo chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME"
 
+phase_done 19
+fi
+
 # ============================================================
-# Summary
+# Cleanup & Summary
 # ============================================================
+
+rm -f "$CHECKPOINT_FILE"
 
 echo ""
 echo "========================================="
