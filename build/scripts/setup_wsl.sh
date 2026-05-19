@@ -19,8 +19,8 @@
 #   wsl --export <distro> netshoot.tar        # Export
 #   wsl --import netshoot <path> netshoot.tar  # Import on air-gapped machine
 #
-# Internal network (post-import) apt packages:
-#   See generated file: build/scripts/internal_apt_packages.txt
+# All apt packages are pre-installed during setup (Phase 1).
+# Reference list: build/scripts/internal_apt_packages.txt
 #
 
 set -euo pipefail
@@ -33,13 +33,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DOTFILES_DIR="$PROJECT_DIR/build/dotfiles/.config"
 
-# Support root execution (Docker test) via WSL_USER env var
+# Mirror source for LinuxMirrors (change apt/docker registry mirrors)
+# Common options: mirrors.aliyun.com, mirrors.ustc.edu.cn, mirrors.tuna.tsinghua.edu.cn
+# Set to "" to skip mirror change
+MIRROR_SOURCE="${MIRROR_SOURCE:-mirrors.aliyun.com}"
+
+# Default WSL user
+TARGET_USER="${WSL_USER:-tulip}"
+
+# Support root execution (Docker test)
 if [[ "$(id -u)" -eq 0 ]]; then
     # Running as root: sudo passthrough (handles VAR=value command syntax)
     sudo() {
         if [[ "$1" == *=* ]]; then env "$@"; else "$@"; fi
     }
-    TARGET_USER="${WSL_USER:?When running as root, set WSL_USER=<username>}"
+    # Create default user if it doesn't exist
+    if ! id "$TARGET_USER" &>/dev/null; then
+        useradd -s /bin/zsh -m "$TARGET_USER"
+        usermod -aG sudo "$TARGET_USER"
+        # Allow passwordless sudo
+        echo "$TARGET_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$TARGET_USER"
+        chmod 440 "/etc/sudoers.d/$TARGET_USER"
+    fi
 else
     TARGET_USER="$(whoami)"
 fi
@@ -63,21 +78,73 @@ warn()   { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error()  { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
 # ============================================================
-# Phase 1: Minimal System Prerequisites
+# Phase 1: System Packages
 # ============================================================
 
-log "Phase 1/18: Installing minimal prerequisites..."
+log "Phase 1/19: Installing system packages..."
 
+# Prerequisites for add-apt-repository and LinuxMirrors
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates curl wget jq git zsh rsync sudo \
-    software-properties-common locales unzip pipx
+    ca-certificates curl wget jq software-properties-common
+
+# Change apt sources to domestic mirror (https://github.com/SuperManito/LinuxMirrors)
+if [[ -n "$MIRROR_SOURCE" ]]; then
+    log "  Changing apt sources to $MIRROR_SOURCE..."
+    bash <(curl -sSL https://linuxmirrors.cn/main.sh) \
+        --source "$MIRROR_SOURCE" \
+        --protocol https \
+        --use-intranet-source false \
+        --backup true \
+        --upgrade-software false \
+        --clean-cache false \
+        --ignore-backup-tips \
+        || warn "Mirror change failed, continuing with default sources"
+fi
+
+# Enable universe repository
+sudo add-apt-repository universe
+sudo apt-get update
+
+# Install all packages (pre-installed for air-gapped export)
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    `# --- Networking Tools ---` \
+    apache2-utils bind9-utils bridge-utils conntrack dhcping ethtool \
+    iftop iperf3 iproute2 ipset iptables iputils-ping ipvsadm \
+    mtr whois net-tools netcat-openbsd nftables ngrep nmap openssl \
+    socat speedtest-cli tcpdump tcpflow tcptraceroute traceroute telnet \
+    \
+    `# --- System Utilities ---` \
+    bash busybox file jq libc6 util-linux zsh ufw sudo rsync tree \
+    xz-utils tar bzip2 expect pv unzip zip procps man-db parallel \
+    bsdiff xdelta3 linux-tools-common linux-tools-generic skopeo ffmpeg \
+    qemu-system qemu-system-x86 git locales unzip pipx \
+    \
+    `# --- Development and Debugging ---` \
+    httpie ltrace openssh-client openssh-server perl python3 python3-pip \
+    python3-dev python3-venv python3-setuptools build-essential cmake \
+    ccache gdb g++ gcc clang make valgrind bear maven openjdk-21-jdk \
+    strace swaks vim tmux \
+    \
+    `# --- Monitoring and Performance ---` \
+    fping snmp \
+    \
+    `# --- Scripting and Extended Utilities ---` \
+    dnsutils python3-scapy tshark mitmproxy \
+    \
+    `# --- Modern Unix ---` \
+    bat fd-find ripgrep hyperfine 
+    # \
+    # `# --- VNC Server ---` \
+    # tracker dbus dbus-x11 gnome-session xdg-utils libx11-dev libxext-dev \
+    # gnome-panel gnome-settings-daemon metacity nautilus gnome-terminal \
+    # ubuntu-desktop tightvncserver
 
 # ============================================================
 # Phase 2: Locale Setup
 # ============================================================
 
-log "Phase 2/18: Setting up locale..."
+log "Phase 2/19: Setting up locale..."
 
 sudo locale-gen en_US en_US.UTF-8
 sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
@@ -86,7 +153,7 @@ sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
 # Phase 3: Default Shell
 # ============================================================
 
-log "Phase 3/18: Setting zsh as default shell..."
+log "Phase 3/19: Setting zsh as default shell..."
 
 sudo chsh -s "$(which zsh)" "$TARGET_USER"
 
@@ -94,9 +161,9 @@ sudo chsh -s "$(which zsh)" "$TARGET_USER"
 # Phase 4: Workspace Directories
 # ============================================================
 
-log "Phase 4/18: Creating workspace directories..."
+log "Phase 4/19: Creating workspace directories..."
 
-mkdir -p "$TARGET_HOME/Workspaces/git"
+mkdir -p "$TARGET_HOME/Workspaces/Git"
 mkdir -p "$TARGET_HOME/Workspaces/Projects"
 mkdir -p "$TARGET_HOME/Workspaces/Utils"
 
@@ -104,7 +171,7 @@ mkdir -p "$TARGET_HOME/Workspaces/Utils"
 # Phase 5: External Binaries (GitHub Releases)
 # ============================================================
 
-log "Phase 5/18: Fetching external binaries from GitHub releases..."
+log "Phase 5/19: Fetching external binaries from GitHub releases..."
 
 BIN_DIR="/tmp/wsl_binaries"
 rm -rf "$BIN_DIR" && mkdir -p "$BIN_DIR"
@@ -187,7 +254,7 @@ rm -rf "$BIN_DIR"
 # Phase 6: Zim Framework
 # ============================================================
 
-log "Phase 6/18: Installing Zim framework..."
+log "Phase 6/19: Installing Zim framework..."
 
 zsh -c 'curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh' || warn "Zim install had issues"
 
@@ -195,7 +262,7 @@ zsh -c 'curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/instal
 # Phase 7: Dotfiles and Configurations
 # ============================================================
 
-log "Phase 7/18: Copying dotfiles..."
+log "Phase 7/19: Copying dotfiles..."
 
 rsync -avzh "$DOTFILES_DIR/" "$TARGET_HOME/"
 
@@ -213,7 +280,7 @@ grep -q '\$HOME/go/bin' "$TARGET_HOME/.shellrc" 2>/dev/null || \
 # Phase 8: Zim Modules + p10k gitstatus
 # ============================================================
 
-log "Phase 8/18: Installing Zim modules..."
+log "Phase 8/19: Installing Zim modules..."
 
 zsh -c 'source ~/.zshrc 2>/dev/null; zimfw install' || warn "Zim module install had issues"
 
@@ -226,16 +293,19 @@ fi
 # Phase 9: nvm + Node.js
 # ============================================================
 
-log "Phase 9/18: Installing nvm and Node.js LTS..."
+log "Phase 9/19: Installing nvm and Node.js LTS..."
 
 export NVM_DIR="$TARGET_HOME/.nvm"
 if [[ ! -d "$NVM_DIR" ]]; then
     git clone https://github.com/nvm-sh/nvm.git "$NVM_DIR"
     (cd "$NVM_DIR" && git checkout "$(git describe --abbrev=0 --tags --match "v[0-9]*" $(git rev-list --tags --max-count=1))")
 fi
+# nvm uses unset variables internally; temporarily disable nounset
 # shellcheck source=/dev/null
+set +u
 . "$NVM_DIR/nvm.sh"
 nvm install --lts && nvm use --lts
+set -u
 
 # ============================================================
 # Phase 10: Neovim + LazyVim
@@ -246,7 +316,7 @@ case "$(uname -m)" in
     aarch64) NVIM_ARCH="arm64" ;;
 esac
 
-log "Phase 10/18: Installing Neovim..."
+log "Phase 10/19: Installing Neovim..."
 
 curl -LO "https://github.com/neovim/neovim/releases/latest/download/nvim-linux-${NVIM_ARCH}.tar.gz"
 sudo rm -rf "/opt/nvim-linux-${NVIM_ARCH}"
@@ -270,6 +340,8 @@ mkdir -p "$TARGET_HOME/.config/nvim/lua/config"
 cp -f "$TARGET_HOME/init.lua" "$TARGET_HOME/.config/nvim/init.lua"
 cp -f "$TARGET_HOME/config.lua" "$TARGET_HOME/.config/nvim/lua/config/config.lua"
 
+npm install -g tree-sitter-cli
+
 # Sync LazyVim plugins
 nvim --headless "+Lazy! sync" +qa || warn "LazyVim sync had issues"
 
@@ -277,7 +349,7 @@ nvim --headless "+Lazy! sync" +qa || warn "LazyVim sync had issues"
 # Phase 11: fzf
 # ============================================================
 
-log "Phase 11/18: Installing fzf..."
+log "Phase 11/19: Installing fzf..."
 
 if [[ ! -d "$TARGET_HOME/.fzf" ]]; then
     git clone --depth 1 https://github.com/junegunn/fzf.git "$TARGET_HOME/.fzf"
@@ -285,30 +357,19 @@ fi
 "$TARGET_HOME/.fzf/install" --bin
 
 # ============================================================
-# Phase 12: Docker Engine
+# Phase 12: Podman
 # ============================================================
 
-log "Phase 12/18: Installing Docker..."
-
-bash <(curl -sSL https://linuxmirrors.cn/docker.sh) || warn "Docker installation failed"
-
-# Add current user to docker group
-sudo usermod -aG docker "$TARGET_USER" 2>/dev/null || true
-
-# ============================================================
-# Phase 13: Podman
-# ============================================================
-
-log "Phase 13/18: Installing Podman..."
+log "Phase 12/19: Installing Podman..."
 
 sudo apt-get install -y podman fuse-overlayfs || warn "Podman apt install failed"
 podman machine init 2>&1 || warn "podman machine init failed (may need virtualization support)"
 
 # ============================================================
-# Phase 14: uv (Python Package Manager)
+# Phase 13: uv (Python Package Manager)
 # ============================================================
 
-log "Phase 14/18: Installing uv..."
+log "Phase 13/19: Installing uv..."
 
 curl -LsSf https://astral.sh/uv/install.sh | sh || warn "uv install failed"
 
@@ -316,9 +377,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh || warn "uv install failed"
 # Phase 14: Go
 # ============================================================
 
-GO_VERSION=1.25.5
+GO_VERSION=1.26.3
 
-log "Phase 15/19: Installing Go ${GO_VERSION}..."
+log "Phase 14/19: Installing Go ${GO_VERSION}..."
 
 case "$(uname -m)" in
     x86_64) GO_ARCH="amd64" ;;
@@ -328,7 +389,21 @@ sudo rm -rf /usr/local/go
 wget -q -O- "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | sudo tar -C /usr/local -xzf -
 
 # ============================================================
-# Phase 15: Claude Code Ecosystem
+# Phase 15: Cargo (Rust Toolchain)
+# ============================================================
+
+log "Phase 15/19: Installing Rust toolchain (cargo)..."
+
+export RUSTUP_HOME="$TARGET_HOME/.rustup"
+export CARGO_HOME="$TARGET_HOME/.cargo"
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+export PATH="$CARGO_HOME/bin:$PATH"
+
+cargo install gping
+cargo install git-delta
+cargo install procs
+# ============================================================
+# Phase 16: Claude Code Ecosystem
 # ============================================================
 
 log "Phase 16/19: Installing Claude Code and ecosystem..."
@@ -354,7 +429,6 @@ for plugin in \
     "affaan-m/everything-claude-code"; do
     claude plugin marketplace add "$plugin" 2>/dev/null || warn "Plugin add failed: $plugin"
 done
-claude plugin install superpowers@superpowers-marketplace 2>/dev/null || warn "superpowers plugin install failed"
 
 # SuperClaude
 pipx install superclaude 2>/dev/null && superclaude install || warn "superclaude install failed"
@@ -362,7 +436,7 @@ pipx install superclaude 2>/dev/null && superclaude install || warn "superclaude
 # npm global tools -> install via npm mirror in internal network
 
 # ============================================================
-# Phase 16: Modern Unix Tools
+# Phase 17: Modern Unix Tools
 # ============================================================
 
 log "Phase 17/19: Installing modern Unix tools..."
@@ -376,7 +450,7 @@ go install github.com/charmbracelet/glow/v2@latest
 
 # mcat
 curl --proto '=https' --tlsv1.2 -LsSf \
-    https://github.com/Skardyy/mcat/releases/download/v0.4.6/mcat-installer.sh | sh || warn "mcat install failed"
+    https://github.com/Skardyy/mcat/releases/download/v0.6.1/mcat-installer.sh | sh || warn "mcat install failed"
 
 # mermaid-cli -> install via npm mirror in internal network
 
@@ -427,12 +501,12 @@ EOF
 
 # Generate internal network apt package list
 cat > "$SCRIPT_DIR/internal_apt_packages.txt" << 'PKGLIST'
-# Internal Network Apt Packages
-# Install with:
-#   sudo apt update && sudo apt install -y $(grep -v '^#' internal_apt_packages.txt | tr '\n' ' ')
+# Pre-installed Apt Packages (Reference List)
+# These packages are installed during setup_wsl.sh Phase 1.
+# This list is for reference only -- no post-import installation needed.
 #
-# These packages can be installed via apt mirrors in the air-gapped network.
-# Comment out or remove unavailable packages as needed.
+# If packages need to be reinstalled on the internal network:
+#   sudo apt update && sudo apt install -y $(grep -v '^#' internal_apt_packages.txt | tr '\n' ' ')
 
 # Networking Tools
 apache2-utils
@@ -491,6 +565,7 @@ xdelta3
 skopeo
 ffmpeg
 qemu-system
+qemu-system-x86
 
 # Development and Debugging
 git
@@ -528,7 +603,7 @@ snmp
 
 # Scripting and Extended Utilities
 dnsutils
-scapy
+python3-scapy
 tshark
 mitmproxy
 
@@ -537,7 +612,6 @@ bat
 fd-find
 ripgrep
 hyperfine
-gping
 
 # VNC Server (optional - WSL2 with WSLg may not need these)
 # Uncomment if VNC is needed:
@@ -575,7 +649,6 @@ export NVM_DIR="$HOME/.nvm"
 
 echo "[NPM] Installing global packages via mirror..."
 
-npm install -g tree-sitter-cli
 npm install -g @fission-ai/openspec@latest
 npm install -g @anthropic-ai/claude-code
 npm install -g @musistudio/claude-code-router
@@ -604,9 +677,8 @@ echo ""
 echo "Import (on air-gapped machine):"
 echo "  wsl --import netshoot <install-path> netshoot.tar"
 echo ""
-echo "Post-import (inside WSL, install apt packages):"
-echo "  sudo apt update"
-echo "  sudo apt install -y \$(grep -v '^#' $(basename "$SCRIPT_DIR")/internal_apt_packages.txt | tr '\n' ' ')"
+echo "Post-import (apt packages are pre-installed, reference list):"
+echo "  $(basename "$SCRIPT_DIR")/internal_apt_packages.txt"
 echo ""
 echo "Post-import (install npm packages via mirror):"
 echo "  bash $(basename "$SCRIPT_DIR")/internal_npm_install.sh"
