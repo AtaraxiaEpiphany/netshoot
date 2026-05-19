@@ -63,10 +63,11 @@ if [[ "$(id -u)" -eq 0 ]]; then
         echo "$TARGET_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$TARGET_USER"
         chmod 440 "/etc/sudoers.d/$TARGET_USER"
     fi
-else
-    TARGET_USER="$(whoami)"
 fi
 TARGET_HOME="$(eval echo "~$TARGET_USER")"
+
+# Ensure all child processes (zim, nvm, uv, cargo, etc.) write to TARGET_USER's home
+export HOME="$TARGET_HOME"
 
 # Architecture detection
 ARCH=$(uname -m)
