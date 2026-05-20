@@ -369,104 +369,10 @@ phase_done 9
 fi
 
 # ============================================================
-# Phase 10: Neovim + LazyVim
+# Phase 10: Cargo (Rust Toolchain) — before Neovim for tree-sitter-cli
 # ============================================================
 
-if phase 10 "Installing Neovim..."; then
-
-NVIM_ARCH="x86_64"
-case "$(uname -m)" in
-    aarch64) NVIM_ARCH="arm64" ;;
-esac
-
-curl -LO "https://github.com/neovim/neovim/releases/latest/download/nvim-linux-${NVIM_ARCH}.tar.gz"
-sudo rm -rf "/opt/nvim-linux-${NVIM_ARCH}"
-sudo tar -C /opt -xzf "nvim-linux-${NVIM_ARCH}.tar.gz"
-rm -f "nvim-linux-${NVIM_ARCH}.tar.gz"
-
-# Update .shellrc with correct nvim path
-sed -i "s|/opt/nvim-linux-x86_64/bin|/opt/nvim-linux-${NVIM_ARCH}/bin|" "$TARGET_HOME/.shellrc"
-
-log "  Configuring LazyVim..."
-export PATH="$PATH:/opt/nvim-linux-${NVIM_ARCH}/bin"
-
-if [[ ! -d "$TARGET_HOME/.config/nvim" ]]; then
-    git clone --depth=1 https://github.com/LazyVim/starter "$TARGET_HOME/.config/nvim"
-fi
-
-# Copy custom nvim config (from dotfiles rsync'd to $HOME)
-mkdir -p "$TARGET_HOME/.config/nvim/lua/config"
-cp -f "$TARGET_HOME/init.lua" "$TARGET_HOME/.config/nvim/init.lua"
-cp -f "$TARGET_HOME/config.lua" "$TARGET_HOME/.config/nvim/lua/config/config.lua"
-
-npm install -g tree-sitter-cli
-
-# Sync LazyVim plugins
-nvim --headless "+Lazy! sync" +qa || warn "LazyVim sync had issues"
-
-phase_done 10
-fi
-
-# ============================================================
-# Phase 11: fzf
-# ============================================================
-
-if phase 11 "Installing fzf..."; then
-
-if [[ ! -d "$TARGET_HOME/.fzf" ]]; then
-    git clone --depth 1 https://github.com/junegunn/fzf.git "$TARGET_HOME/.fzf"
-fi
-"$TARGET_HOME/.fzf/install" --bin
-
-phase_done 11
-fi
-
-# ============================================================
-# Phase 12: Podman
-# ============================================================
-
-if phase 12 "Installing Podman..."; then
-
-sudo apt-get install -y podman fuse-overlayfs || warn "Podman apt install failed"
-podman machine init 2>&1 || warn "podman machine init failed (may need virtualization support)"
-
-phase_done 12
-fi
-
-# ============================================================
-# Phase 13: uv (Python Package Manager)
-# ============================================================
-
-if phase 13 "Installing uv..."; then
-
-curl -LsSf https://astral.sh/uv/install.sh | sh || warn "uv install failed"
-
-phase_done 13
-fi
-
-# ============================================================
-# Phase 14: Go
-# ============================================================
-
-if phase 14 "Installing Go..."; then
-
-GO_VERSION=1.26.3
-
-case "$(uname -m)" in
-    x86_64) GO_ARCH="amd64" ;;
-    aarch64) GO_ARCH="arm64" ;;
-esac
-sudo rm -rf /usr/local/go
-wget -q -O- "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | sudo tar -C /usr/local -xzf -
-
-phase_done 14
-fi
-
-# ============================================================
-# Phase 15: Cargo (Rust Toolchain)
-# ============================================================
-
-if phase 15 "Installing Rust toolchain (cargo)..."; then
+if phase 10 "Installing Rust toolchain (cargo)..."; then
 
 export RUSTUP_HOME="$TARGET_HOME/.rustup"
 export CARGO_HOME="$TARGET_HOME/.cargo"
@@ -485,6 +391,8 @@ if [[ "$(id -u)" -eq 0 ]]; then
             cargo install gping
             cargo install git-delta
             cargo install procs
+            cargo install tree-sitter-cli
+            cargo install mcat
         '
 else
     sudo -u "$TARGET_USER" env HOME="$TARGET_HOME" RUSTUP_HOME="$RUSTUP_HOME" CARGO_HOME="$CARGO_HOME" \
@@ -495,9 +403,111 @@ else
             cargo install gping
             cargo install git-delta
             cargo install procs
+            cargo install tree-sitter-cli
+            cargo install mcat
         '
     export PATH="$CARGO_HOME/bin:$PATH"
 fi
+
+phase_done 10
+fi
+
+# ============================================================
+# Phase 11: Neovim + LazyVim
+# ============================================================
+
+if phase 11 "Installing Neovim..."; then
+
+NVIM_ARCH="x86_64"
+case "$(uname -m)" in
+    aarch64) NVIM_ARCH="arm64" ;;
+esac
+
+curl -LO "https://github.com/neovim/neovim/releases/latest/download/nvim-linux-${NVIM_ARCH}.tar.gz"
+sudo rm -rf "/opt/nvim-linux-${NVIM_ARCH}"
+sudo tar -C /opt -xzf "nvim-linux-${NVIM_ARCH}.tar.gz"
+rm -f "nvim-linux-${NVIM_ARCH}.tar.gz"
+
+# Update .shellrc with correct nvim path
+sed -i "s|/opt/nvim-linux-x86_64/bin|/opt/nvim-linux-${NVIM_ARCH}/bin|" "$TARGET_HOME/.shellrc"
+
+log "  Configuring LazyVim..."
+export PATH="$PATH:/opt/nvim-linux-${NVIM_ARCH}/bin:$CARGO_HOME/bin"
+
+if [[ ! -d "$TARGET_HOME/.config/nvim" ]]; then
+    git clone --depth=1 https://github.com/LazyVim/starter "$TARGET_HOME/.config/nvim"
+fi
+
+# Copy custom nvim config (from dotfiles rsync'd to $HOME)
+mkdir -p "$TARGET_HOME/.config/nvim/lua/config"
+cp -f "$TARGET_HOME/init.lua" "$TARGET_HOME/.config/nvim/init.lua"
+cp -f "$TARGET_HOME/config.lua" "$TARGET_HOME/.config/nvim/lua/config/config.lua"
+
+# Sync LazyVim plugins (tree-sitter-cli from cargo is now available)
+nvim --headless "+Lazy! sync" +qa || warn "LazyVim sync had issues"
+
+phase_done 11
+fi
+
+# ============================================================
+# Phase 12: fzf
+# ============================================================
+
+if phase 12 "Installing fzf..."; then
+
+if [[ ! -d "$TARGET_HOME/.fzf" ]]; then
+    git clone --depth 1 https://github.com/junegunn/fzf.git "$TARGET_HOME/.fzf"
+fi
+"$TARGET_HOME/.fzf/install" --bin
+
+phase_done 12
+fi
+
+# ============================================================
+# Phase 13: Podman
+# ============================================================
+
+if phase 13 "Installing Podman..."; then
+
+sudo apt-get install -y podman fuse-overlayfs || warn "Podman apt install failed"
+podman machine init 2>&1 || warn "podman machine init failed (may need virtualization support)"
+
+phase_done 13
+fi
+
+# ============================================================
+# Phase 14: uv (Python Package Manager)
+# ============================================================
+
+if phase 14 "Installing uv..."; then
+
+chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+    runuser -u "$TARGET_USER" -- env HOME="$TARGET_HOME" \
+        bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+else
+    sudo -u "$TARGET_USER" env HOME="$TARGET_HOME" \
+        bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+fi || warn "uv install failed"
+
+phase_done 14
+fi
+
+# ============================================================
+# Phase 15: Go
+# ============================================================
+
+if phase 15 "Installing Go..."; then
+
+GO_VERSION=1.26.3
+
+case "$(uname -m)" in
+    x86_64) GO_ARCH="amd64" ;;
+    aarch64) GO_ARCH="arm64" ;;
+esac
+sudo rm -rf /usr/local/go
+wget -q -O- "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | sudo tar -C /usr/local -xzf -
 
 phase_done 15
 fi
@@ -558,14 +568,12 @@ fi
 
 if phase 17 "Installing modern Unix tools..."; then
 
+chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME"
+
 # Go-based tools
 export PATH="/usr/local/go/bin:$TARGET_HOME/go/bin:$PATH"
 go install github.com/rs/curlie@latest
 go install github.com/charmbracelet/glow/v2@latest
-
-# mcat
-curl --proto '=https' --tlsv1.2 -LsSf \
-    https://github.com/Skardyy/mcat/releases/download/v0.6.1/mcat-installer.sh | sh || warn "mcat install failed"
 
 phase_done 17
 fi
