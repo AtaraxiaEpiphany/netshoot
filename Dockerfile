@@ -59,8 +59,10 @@ RUN apt-get update \
 	  socat \
 	  speedtest-cli \
 	  tcpdump \
+	  tcpflow \
 	  tcptraceroute \
 	  traceroute \
+	  telnet \
 	  \
 	  # System Utilities \
 	  bash \
@@ -83,12 +85,23 @@ RUN apt-get update \
 	  zip \
 	  procps \
 	  man-db \
+	  parallel \
+	  bsdiff \
+	  xdelta3 \
+	  linux-tools-common \
+	  linux-tools-generic \
+	  linux-tools-$(uname -r) \
+	  skopeo \
+	  ffmpeg \
+	  qemu-system \
+	  # Development and Debugging \
 	  # Development and Debugging \
 	  git \
 	  httpie \
 	  #curlie \
 	  ltrace \
 	  openssh-client \
+	  openssh-server \
 	  perl \
 	  python3 \
 	  python3-pip \
@@ -123,6 +136,7 @@ RUN apt-get update \
 	  net-tools \
 	  scapy \
 	  tshark \
+	  mitmproxy \
 	  \
 	  # Modern unix \
 	  bat \
@@ -132,6 +146,10 @@ RUN apt-get update \
 	  gping \
 	  \
 	  # VNC server related \
+	  tracker \
+	  dbus \
+	  dbus-x11 \
+	  gnome-session \
 	  xdg-utils \
 	  libx11-dev \
 	  libxext-dev \

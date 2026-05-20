@@ -1,0 +1,39 @@
+# --- API / Service ---
+export ANTHROPIC_BASE_URL=http://127.0.0.1:3456
+export CLAUDE_TRACE_INCLUDE_ALL_REQUESTS=true
+export ANTHROPIC_AUTH_TOKEN=sk-local-ccr-9660527
+
+# --- PATH ---
+export PATH="$HOME/.local/bin:$PATH"
+export PATH="$PATH:/opt/nvim-linux-x86_64/bin"
+export PATH="$PATH:$HOME/.fzf/bin"
+export PATH="$PATH:/usr/local/go/bin"
+
+# --- NVM ---
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+# nvm completion
+if [ -n "$ZSH_VERSION" ]; then
+    autoload -Uz bashcompinit && bashcompinit
+    [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+elif [ -n "$BASH_VERSION" ]; then
+    [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+fi
+
+# --- Tool init ---
+#[ -f "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
+# --- C++ ---
+export CXXFLAGS="-std=c++23 -g"
+export CXX="g++-13"
+
+# --- Python venv ---
+#[ -f "$HOME/.jupyter/venv/bin/activate" ] && . "$HOME/.jupyter/venv/bin/activate"
+
+# --- Aliases ---
+alias ls='ls --classify --color=auto'
+alias ll='ls -alh --classify --color=auto'
+alias vim=nvim
+alias vi='\vim'
+alias bat=batcat
