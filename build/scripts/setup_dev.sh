@@ -63,7 +63,7 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 CHECKPOINT_FILE="${CHECKPOINT_FILE:-$TARGET_HOME/.wsl_setup_checkpoint}"
 
-TOTAL_PHASES=7
+TOTAL_PHASES=8
 
 phase() {
     local num=$1
@@ -206,10 +206,108 @@ phase_done 6
 fi
 
 # ============================================================
-# Phase 7: WSL Configuration
+# Phase 7: Shell Environment Configuration
 # ============================================================
 
-if phase 7 "Finalizing configuration..."; then
+if phase 7 "Configuring shell environment..."; then
+
+# --- Fish ---
+mkdir -p "$TARGET_HOME/.config/fish/functions"
+
+# Install bass (Bash adaptation for fish — required by nvm fish wrappers)
+BASS_BASE=https://raw.githubusercontent.com/edc/bass/master/functions
+curl -sL "$BASS_BASE/bass.fish"  -o "$TARGET_HOME/.config/fish/functions/bass.fish"
+curl -sL "$BASS_BASE/__bass.py"  -o "$TARGET_HOME/.config/fish/functions/__bass.py"
+
+# nvm wrapper via bass
+cat > "$TARGET_HOME/.config/fish/functions/nvm.fish" << 'EOF'
+function nvm
+  bass source $NVM_DIR/nvm.sh --no-use ';' nvm $argv
+end
+EOF
+
+cat > "$TARGET_HOME/.config/fish/functions/nvm_find_nvmrc.fish" << 'EOF'
+function nvm_find_nvmrc
+  bass source $NVM_DIR/nvm.sh --no-use ';' nvm_find_nvmrc
+end
+EOF
+
+# Auto-switch node version on directory change (.nvmrc support)
+cat > "$TARGET_HOME/.config/fish/functions/load_nvm.fish" << 'EOF'
+function load_nvm --on-variable="PWD"
+  set -l default_node_version (nvm version default)
+  set -l node_version (nvm version)
+  set -l nvmrc_path (nvm_find_nvmrc)
+  if test -n "$nvmrc_path"
+    set -l nvmrc_node_version (nvm version (cat $nvmrc_path))
+    if test "$nvmrc_node_version" = "N/A"
+      nvm install (cat $nvmrc_path)
+    else if test "$nvmrc_node_version" != "$node_version"
+      nvm use $nvmrc_node_version
+    end
+  else if test "$node_version" != "$default_node_version"
+    echo "Reverting to default Node version"
+    nvm use default
+  end
+end
+EOF
+
+cat > "$TARGET_HOME/.config/fish/config.fish" << 'FISH_CONF'
+# PATH
+fish_add_path /usr/local/go/bin
+fish_add_path $HOME/.local/bin
+fish_add_path $HOME/go/bin
+
+# Cargo (if installed)
+if test -d $HOME/.cargo/bin
+    fish_add_path $HOME/.cargo/bin
+end
+
+set -gx NVM_DIR "$HOME/.nvm"
+set -gx EDITOR vim
+
+# nvm (via bass)
+load_nvm > /dev/stderr
+
+alias ll 'ls -alh'
+alias la 'ls -A'
+FISH_CONF
+
+# --- Bash fallback ---
+cat > "$TARGET_HOME/.bashrc" << 'BASH_CONF'
+# PATH
+export PATH="$HOME/.local/bin:$PATH"
+export PATH="$PATH:/usr/local/go/bin"
+export PATH="$PATH:$HOME/go/bin"
+
+# --- NVM ---
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+# nvm completion
+if [ -n "$ZSH_VERSION" ]; then
+    autoload -Uz bashcompinit && bashcompinit
+    [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+elif [ -n "$BASH_VERSION" ]; then
+    [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+fi
+
+# Cargo (if installed)
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
+export EDITOR=vim
+
+alias ll='ls -alh'
+alias la='ls -A'
+BASH_CONF
+
+phase_done 7
+fi
+
+# ============================================================
+# Phase 8: WSL Configuration
+# ============================================================
+
+if phase 8 "Finalizing configuration..."; then
 
 sudo tee /etc/wsl.conf > /dev/null <<EOF
 [user]
@@ -230,7 +328,7 @@ EOF
 
 sudo chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME"
 
-phase_done 7
+phase_done 8
 fi
 
 # ============================================================
