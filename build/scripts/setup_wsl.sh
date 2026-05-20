@@ -508,30 +508,46 @@ fi
 
 if phase 16 "Installing Claude Code and ecosystem..."; then
 
-export PATH="$TARGET_HOME/.local/bin:$PATH"
+CLAUDE_BIN="$TARGET_HOME/.local/bin/claude"
 
-# Claude Code CLI (install.sh puts binary into ~/.claude/bin or ~/.local/bin)
-curl -fsSL https://claude.ai/install.sh | bash || warn "Claude Code install failed"
+run_as_target() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        runuser -u "$TARGET_USER" -- env HOME="$TARGET_HOME" PATH="$TARGET_HOME/.local/bin:$PATH" "$@"
+    else
+        sudo -u "$TARGET_USER" env HOME="$TARGET_HOME" PATH="$TARGET_HOME/.local/bin:$PATH" "$@"
+    fi
+}
 
-# Refresh PATH so subsequent `claude` commands resolve
-export PATH="$TARGET_HOME/.local/bin:$TARGET_HOME/.claude/bin:$PATH"
-hash -r 2>/dev/null || true
+# Fix ownership before running as target user
+chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME"
+
+# Claude Code CLI — must run as target user so install.sh writes to correct $HOME
+run_as_target bash -c '
+    set -euo pipefail
+    curl -fsSL https://claude.ai/install.sh | bash
+' || warn "Claude Code install failed"
 
 # Plugins
-for plugin in \
-    "anthropics/skills" \
-    "anthropics/claude-plugins-official" \
-    "obra/superpowers-marketplace" \
-    "OthmanAdi/planning-with-files" \
-    "K-Dense-AI/claude-scientific-skills" \
-    "jarrodwatts/claude-hud" \
-    "kepano/obsidian-skills" \
-    "affaan-m/everything-claude-code"; do
-    claude plugin marketplace add "$plugin" 2>/dev/null || warn "Plugin add failed: $plugin"
-done
+if [[ -x "$CLAUDE_BIN" ]]; then
+    for plugin in \
+        "anthropics/skills" \
+        "anthropics/claude-plugins-official" \
+        "obra/superpowers-marketplace" \
+        "OthmanAdi/planning-with-pages" \
+        "K-Dense-AI/claude-scientific-skills" \
+        "jarrodwatts/claude-hud" \
+        "kepano/obsidian-skills" \
+        "affaan-m/everything-claude-code"; do
+        run_as_target "$CLAUDE_BIN" plugin marketplace add "$plugin" 2>/dev/null \
+            || warn "Plugin add failed: $plugin"
+    done
+else
+    warn "claude binary not found at $CLAUDE_BIN, skipping plugins"
+fi
 
 # SuperClaude
-pipx install superclaude 2>/dev/null && superclaude install || warn "superclaude install failed"
+run_as_target pipx install superclaude 2>/dev/null && run_as_target superclaude install \
+    || warn "superclaude install failed"
 
 phase_done 16
 fi
