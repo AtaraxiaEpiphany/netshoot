@@ -471,6 +471,9 @@ if phase 15 "Installing Rust toolchain (cargo)..."; then
 export RUSTUP_HOME="$TARGET_HOME/.rustup"
 export CARGO_HOME="$TARGET_HOME/.cargo"
 
+# Earlier phases ran as root and wrote to $TARGET_HOME — fix ownership before dropping privileges
+chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME"
+
 if [[ "$(id -u)" -eq 0 ]]; then
     # Drop privileges — rustup refuses to run when $HOME ≠ euid home
     runuser -u "$TARGET_USER" -- \
@@ -484,11 +487,16 @@ if [[ "$(id -u)" -eq 0 ]]; then
             cargo install procs
         '
 else
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    sudo -u "$TARGET_USER" env HOME="$TARGET_HOME" RUSTUP_HOME="$RUSTUP_HOME" CARGO_HOME="$CARGO_HOME" \
+        bash -c '
+            set -euo pipefail
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            export PATH="$HOME/.cargo/bin:$PATH"
+            cargo install gping
+            cargo install git-delta
+            cargo install procs
+        '
     export PATH="$CARGO_HOME/bin:$PATH"
-    cargo install gping
-    cargo install git-delta
-    cargo install procs
 fi
 
 phase_done 15
