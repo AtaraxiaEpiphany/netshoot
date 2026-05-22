@@ -469,7 +469,24 @@ fi
 
 if phase 13 "Installing Podman..."; then
 
-sudo apt-get install -y podman fuse-overlayfs || warn "Podman apt install failed"
+sudo apt-get install -y podman fuse-overlayfs uidmap slirp4netns || warn "Podman apt install failed"
+
+# Ensure subuid/subgid entries for rootless podman
+if ! grep -q "^${TARGET_USER}:" /etc/subuid 2>/dev/null; then
+    sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$TARGET_USER"
+fi
+
+# Configure storage for rootless podman under WSL2
+mkdir -p "$TARGET_HOME/.config/containers"
+if [[ ! -f "$TARGET_HOME/.config/containers/storage.conf" ]]; then
+    cat > "$TARGET_HOME/.config/containers/storage.conf" <<STORAGEEOF
+[storage]
+driver = "overlay"
+graphroot = "$TARGET_HOME/.local/share/containers/storage"
+runroot = "/run/user/$(id -u "$TARGET_USER")/containers"
+STORAGEEOF
+fi
+
 podman machine init 2>&1 || warn "podman machine init failed (may need virtualization support)"
 
 phase_done 13
